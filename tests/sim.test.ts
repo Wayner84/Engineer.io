@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { BUILDINGS, type BuildingKind, campaignProgress, demolish, fulfillContract, load, newGame, place, save, tick, unlockResearch } from '../src/sim';
+import { BUILDINGS, GRID_HEIGHT, GRID_WIDTH, type BuildingKind, beltDirection, campaignProgress, demolish, fulfillContract, load, newGame, place, save, tick, unlockResearch } from '../src/sim';
 
 describe('Engineer.io simulation', () => {
+  it('normalizes belt rotations into accessible cardinal directions', () => { expect([0, 1, 2, 3, 4, -1].map(beltDirection)).toEqual(['east', 'south', 'west', 'north', 'east', 'north']); });
   it('starts with deposits and starter economy', () => { const s = newGame(); expect(s.credits).toBe(1200); expect(s.grid[2][2].item).toBe('ironOre'); });
+  it('extracts coal from every coal deposit and decrements only that deposit', () => {
+    const initial = newGame();
+    const coalDeposits = initial.grid.flatMap((row, y) => row.map((tile, x) => tile.item === 'coal' ? [x, y] as const : null)).filter((entry): entry is readonly [number, number] => entry !== null);
+    for (const [x, y] of coalDeposits) { const s = newGame(); const before = s.grid[y][x].amount!; const coalBefore = s.inventory.coal; expect(place(s, x, y, 'drill')).toBe(true); tick(s); expect(s.inventory.coal).toBe(coalBefore + 1); expect(s.grid[y][x].amount).toBe(before - 1); for (const [ox, oy] of coalDeposits) if (ox !== x || oy !== y) expect(s.grid[oy][ox].amount).toBe(999); }
+  });
+  it('does not produce coal from non-coal drills', () => { const s = newGame(); const coalBefore = s.inventory.coal; expect(place(s, 2, 2, 'drill')).toBe(true); tick(s); expect(s.inventory.coal).toBe(coalBefore); });
   it('rejects a drill away from a deposit without charging credits', () => { const s = newGame(); expect(place(s, 0, 0, 'drill')).toBe(false); expect(s.credits).toBe(1200); });
   it('places a drill without destroying the deposit and extracts its resource', () => {
     for (const [x, y, item] of [[2, 2, 'ironOre'], [4, 8, 'copperOre'], [14, 3, 'coal'], [13, 9, 'stone']] as const) { const s = newGame(); place(s, x, y, 'drill'); expect(s.grid[y][x].item).toBe(item); tick(s); expect(s.inventory[item]).toBeGreaterThan(0); }
@@ -31,7 +38,8 @@ describe('Engineer.io simulation', () => {
     place(s, 0, 0, 'furnace'); place(s, 4, 8, 'drill'); expect(campaignProgress(s).objective.id).toBe('drill');
     place(s, 2, 2, 'drill'); expect(campaignProgress(s).objective.id).toBe('steel');
     s.contracts[0].done = true; expect(campaignProgress(s).objective.id).toBe('quality');
-    s.research.push('quality'); expect(campaignProgress(s).objective.id).toBe('lathe');
+    s.research.push('quality'); expect(campaignProgress(s).objective.id).toBe('coal');
+    place(s, 5, 4, 'drill'); expect(campaignProgress(s).objective.id).toBe('lathe');
     place(s, 1, 0, 'lathe'); s.quality = 78; expect(campaignProgress(s).objective.id).toBe('shafts');
     s.contracts[1].done = true; expect(campaignProgress(s).objective.id).toBe('complete');
   });
@@ -39,19 +47,27 @@ describe('Engineer.io simulation', () => {
     let s = newGame(); expect(place(s, 2, 2, 'drill')).toBe(true); expect(place(s, 0, 0, 'furnace')).toBe(true);
     tick(s, 8); expect(s.inventory.steel).toBeGreaterThanOrEqual(8); expect(fulfillContract(s, 'C-101').ok).toBe(true);
     const research = unlockResearch(s, 'quality'); expect(research.ok).toBe(true); if (!research.ok) throw new Error('research failed'); s = research.state;
-    expect(place(s, 1, 0, 'lathe')).toBe(true); expect(place(s, 14, 3, 'drill')).toBe(true);
+    expect(place(s, 1, 0, 'lathe')).toBe(true); expect(place(s, 5, 4, 'drill')).toBe(true);
     tick(s, 8); expect(s.quality).toBeGreaterThanOrEqual(78); expect(s.inventory.shaft).toBeGreaterThanOrEqual(4);
     expect(fulfillContract(s, 'C-202').ok).toBe(true); expect(campaignProgress(s).objective.id).toBe('complete'); expect(s.tick).toBeLessThan(1400);
   });
   it('round trips persistence with deposits under drills', () => { const s = newGame(); place(s, 2, 2, 'drill'); expect(load(save(s)).grid[2][2]).toMatchObject({ kind: 'drill', item: 'ironOre', amount: 999 }); });
-  it('migrates legacy v1 drills and refunds off-deposit placements', () => {
-    const legacy = JSON.parse(save(newGame())); legacy.version = 1; legacy.credits = 960; legacy.grid[2][2] = { kind: 'drill', rot: 0 }; legacy.grid[0][0] = { kind: 'drill', rot: 1 };
+  it('migrates legacy v1 drills and refunds off-deposit placements without inventing deposits under old buildings', () => {
+    const legacy = JSON.parse(save(newGame())); legacy.version = 1; legacy.grid = legacy.grid.slice(0, 12).map((row: unknown[]) => row.slice(0, 18)); legacy.credits = 840; legacy.grid[2][2] = { kind: 'drill', rot: 0 }; legacy.grid[0][0] = { kind: 'drill', rot: 1 }; legacy.grid[4][5] = { kind: 'drill', rot: 2 }; legacy.grid[2][6] = { kind: 'furnace', rot: 3 };
     const migrated = load(JSON.stringify(legacy));
     expect(migrated.grid[2][2]).toMatchObject({ kind: 'drill', item: 'ironOre', amount: 999 });
     expect(migrated.grid[0][0]).toEqual({ rot: 0 });
+    expect(migrated.grid[4][5]).toEqual({ rot: 0 });
+    expect(migrated.grid[2][6]).toEqual({ kind: 'furnace', rot: 3 });
     expect(migrated.credits).toBe(1080);
-    expect(JSON.parse(save(migrated)).version).toBe(2);
+    expect(JSON.parse(save(migrated)).version).toBe(3);
   });
+  it('migrates valid v2 18x12 saves into the enlarged map without overwriting old state', () => {
+    const legacy = JSON.parse(save(newGame())); legacy.version = 2; legacy.grid = legacy.grid.slice(0, 12).map((row: unknown[]) => row.slice(0, 18)); legacy.grid[0][0] = { kind: 'furnace', rot: 2 }; legacy.inventory.coal = 37;
+    const migrated = load(JSON.stringify(legacy));
+    expect(migrated.grid).toHaveLength(18); expect(migrated.grid[0]).toHaveLength(30); expect(migrated.grid[0][0]).toEqual({ kind: 'furnace', rot: 2 }); expect(migrated.inventory.coal).toBe(37); expect(JSON.parse(save(migrated)).version).toBe(3);
+  });
+  it('rejects malformed current v3 dimensions', () => { const current = JSON.parse(save(newGame())); current.grid = current.grid.slice(0, 17); expect(() => load(JSON.stringify(current))).toThrow(); });
   it('fails safely for malformed or unsupported saves', () => {
     expect(() => load('{bad')).toThrow();
     expect(() => load(JSON.stringify({ version: 99 }))).toThrow();

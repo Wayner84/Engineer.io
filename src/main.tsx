@@ -2,6 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   BUILDINGS,
+  GRID_HEIGHT,
+  GRID_WIDTH,
+  beltDirection,
   type BuildingKind,
   type GameState,
   campaignProgress,
@@ -32,7 +35,7 @@ const names: Record<string, string> = {
 const deposits: Record<string, { short: string; color: string }> = {
   ironOre: { short: 'FE', color: '#9cb6c5' },
   copperOre: { short: 'CU', color: '#d9855b' },
-  coal: { short: 'CO', color: '#697681' },
+  coal: { short: 'CO', color: '#f1c566' },
   stone: { short: 'ST', color: '#b8aa8e' },
 };
 
@@ -49,6 +52,7 @@ function App() {
   const [tab, setTab] = useState<Tab>('factory');
   const [notice, setNotice] = useState('Select a machine, then click the factory floor.');
   const [zoom, setZoom] = useState(1);
+  const [animationPhase, setAnimationPhase] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const campaign = campaignProgress(state);
 
@@ -64,21 +68,34 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let frame = 0; let last = performance.now();
+    const animate = (now: number) => { const delta = now - last; last = now; if (!state.paused) setAnimationPhase((phase) => phase + delta * state.speed * 0.004); frame = requestAnimationFrame(animate); };
+    frame = requestAnimationFrame(animate); return () => cancelAnimationFrame(frame);
+  }, [state.paused, state.speed]);
+
+  useEffect(() => {
     localStorage.setItem('engineer-save', save(state));
+  }, [state]);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const context = canvas.getContext('2d');
     if (!context) return;
     const ratio = window.devicePixelRatio || 1;
-    canvas.width = Math.floor(canvas.clientWidth * ratio);
-    canvas.height = Math.floor(canvas.clientHeight * ratio);
+    const cell = 44 * zoom;
+    const width = GRID_WIDTH * cell;
+    const height = GRID_HEIGHT * cell;
+    canvas.width = Math.floor(width * ratio);
+    canvas.height = Math.floor(height * ratio);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
-    const cell = Math.min(canvas.clientWidth / 18, canvas.clientHeight / 12) * zoom;
     context.fillStyle = '#0c1117';
-    context.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+    context.fillRect(0, 0, width, height);
 
-    for (let y = 0; y < 12; y++) {
-      for (let x = 0; x < 18; x++) {
+    for (let y = 0; y < GRID_HEIGHT; y++) {
+      for (let x = 0; x < GRID_WIDTH; x++) {
         const tile = state.grid[y][x];
         const px = x * cell;
         const py = y * cell;
@@ -99,22 +116,39 @@ function App() {
           context.fillText(String(tile.amount ?? 0), px + 5, py + cell - 5);
         }
         if (tile.kind) {
+          context.save();
+          context.translate(px + cell / 2, py + cell / 2);
+          const pulse = tile.kind === 'furnace' ? 1 + Math.sin(animationPhase) * 0.08 : 1;
+          context.rotate(tile.kind === 'lathe' ? animationPhase : tile.kind === 'drill' ? animationPhase * 0.7 : 0);
+          context.scale(pulse, pulse);
           context.fillStyle = BUILDINGS[tile.kind].color;
-          context.fillRect(px + 7, py + 7, Math.max(8, cell - 14), Math.max(8, cell - 14));
-          context.fillStyle = '#101820';
-          context.font = 'bold 9px IBM Plex Mono, monospace';
-          context.fillText(tile.kind.slice(0, 4).toUpperCase(), px + 9, py + cell / 2 + 3);
-          if (tile.rot) context.fillText('↻'.repeat(tile.rot), px + 9, py + cell - 9);
+          context.fillRect(-cell / 2 + 7, -cell / 2 + 7, Math.max(8, cell - 14), Math.max(8, cell - 14));
+          context.fillStyle = '#101820'; context.font = 'bold 9px IBM Plex Mono, monospace'; context.textAlign = 'center';
+          context.fillText(tile.kind.slice(0, 4).toUpperCase(), 0, 3);
+          context.restore();
+        }
+        if (tile.kind === 'conveyor') {
+          const directions = { east: '→', south: '↓', west: '←', north: '↑' } as const;
+          context.fillStyle = '#f1c566'; context.font = `bold ${Math.max(16, cell * .45)}px sans-serif`; context.textAlign = 'center';
+          const direction = beltDirection(tile.rot);
+          const arrow = directions[direction];
+          const travel = state.paused ? 0.5 : animationPhase % 1;
+          for (const offset of [travel, (travel + 0.5) % 1]) {
+            const along = (offset - 0.5) * cell * 0.65;
+            const ax = px + cell / 2 + (direction === 'east' ? along : direction === 'west' ? -along : 0);
+            const ay = py + cell / 2 + (direction === 'south' ? along : direction === 'north' ? -along : 0);
+            context.fillText(arrow, ax, ay + cell * 0.16);
+          }
         }
       }
     }
-  }, [state, zoom]);
+  }, [state, zoom, animationPhase]);
 
   function handleCanvasClick(event: React.MouseEvent<HTMLCanvasElement>) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const cell = Math.min(rect.width / 18, rect.height / 12) * zoom;
+    const cell = 44 * zoom;
     const x = Math.floor((event.clientX - rect.left) / cell);
     const y = Math.floor((event.clientY - rect.top) / cell);
     const tile = state.grid[y]?.[x];
@@ -141,7 +175,7 @@ function App() {
           return current;
         }
         place(next, x, y, next.selected);
-        setNotice(`${building.label} installed at ${x + 1}, ${y + 1}.`);
+        setNotice(`${building.label} installed at ${x + 1}, ${y + 1}${next.selected === 'conveyor' ? ', facing east' : ''}.`);
         return next;
       }
       if (next.mode === 'demolish') {
@@ -159,7 +193,7 @@ function App() {
         return current;
       }
       rotate(next, x, y);
-      setNotice(`${BUILDINGS[target.kind].label} rotated.`);
+      setNotice(`${BUILDINGS[target.kind].label} rotated${target.kind === 'conveyor' ? ` to ${beltDirection(next.grid[y][x].rot)}` : ''}.`);
       return next;
     });
   }
@@ -219,10 +253,10 @@ function App() {
               <div className="toolbar">
                 <button aria-pressed={state.mode === 'select'} className={state.mode === 'select' ? 'chosen' : ''} onClick={() => setState((x) => ({ ...x, mode: 'select' }))}>SELECT / ROTATE</button>
                 <button aria-pressed={state.mode === 'demolish'} className={state.mode === 'demolish' ? 'chosen danger' : ''} onClick={() => setState((x) => ({ ...x, mode: 'demolish' }))}>DEMOLISH</button>
-                {(Object.keys(BUILDINGS) as BuildingKind[]).map((kind) => <button key={kind} aria-pressed={state.mode === 'place' && state.selected === kind} className={state.mode === 'place' && state.selected === kind ? 'chosen' : ''} onClick={() => { setState((x) => ({ ...x, mode: 'place', selected: kind })); setNotice(`${BUILDINGS[kind].label} selected. Choose a free cell${kind === 'drill' ? ' on a deposit' : ''}.`); }}>{BUILDINGS[kind].label}<small>₡{BUILDINGS[kind].cost}</small></button>)}
+                {(Object.keys(BUILDINGS) as BuildingKind[]).map((kind) => <button key={kind} aria-pressed={state.mode === 'place' && state.selected === kind} className={state.mode === 'place' && state.selected === kind ? 'chosen' : ''} onClick={() => { setState((x) => ({ ...x, mode: 'place', selected: kind })); setNotice(`${BUILDINGS[kind].label} selected${kind === 'conveyor' ? ', facing east' : ''}. Choose a free cell${kind === 'drill' ? ' on a deposit' : ''}.`); }}>{BUILDINGS[kind].label}<small>₡{BUILDINGS[kind].cost}</small></button>)}
                 <label>ZOOM <input aria-label="Factory zoom" type="range" min=".7" max="1.4" step=".1" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
               </div>
-              <div className="board"><canvas ref={canvasRef} onClick={handleCanvasClick} aria-label="Interactive 18 by 12 factory floor" /><div className="legend"><span>{state.mode === 'place' ? 'PLACEMENT MODE' : state.mode === 'demolish' ? 'DEMOLITION MODE' : 'SELECT MODE'}</span><span>FE IRON · CU COPPER · CO COAL · ST STONE</span><span>TICK {state.tick}</span></div></div>
+              <div className="board"><canvas ref={canvasRef} onClick={handleCanvasClick} aria-label={`Interactive ${GRID_WIDTH} by ${GRID_HEIGHT} factory floor`} /><div className="legend"><span>{state.mode === 'place' ? 'PLACEMENT MODE' : state.mode === 'demolish' ? 'DEMOLITION MODE' : 'SELECT / ROTATE MODE'}</span><span>BELTS: 0 EAST · 1 SOUTH · 2 WEST · 3 NORTH · SELECT/ROTATE</span><span>COAL: high-contrast CO deposit · TICK {state.tick}</span></div></div>
               <section className="panels"><div><h3>STOCK CONTROL <i>LIVE</i></h3><div className="stock">{Object.entries(state.inventory).map(([key, value]) => <span key={key}><b>{names[key] || key}</b><strong>{value}</strong></span>)}</div></div><div><h3>HOW PRODUCTION WORKS</h3><p>Every active machine reads from the shared stock inventory once per tick. Drills extract their deposit, furnaces consume ore and coal, and lathes turn steel into shafts. Conveyors are visual planning tools in this base build; routed logistics are a later milestone.</p></div></section>
             </>
           ) : tab === 'research' ? <Research state={state} setState={setState} setNotice={setNotice} /> : tab === 'orders' ? <Orders state={state} setState={setState} setNotice={setNotice} /> : <Guide />}
@@ -272,7 +306,7 @@ function Orders({ state, setState, setNotice }: { state: GameState; setState: Re
 }
 
 function Guide() {
-  return <div className="guide"><h2>THE STARTER CAMPAIGN</h2><ol><li>Choose Powered Drill and click the FE iron deposit.</li><li>Place an Arc Furnace on any free cell. Machines process the shared stock once each tick.</li><li>Wait for 8 steel, open Contracts and ship C-101.</li><li>Open Research and buy Quality for ₡300.</li><li>Place a Manual Lathe and a drill on the CO coal deposit. Produce shafts until quality reaches 78%.</li><li>Ship C-202 to complete the starter loop.</li></ol><h2>BASE-BUILD LIMITS</h2><p>Conveyors, storage, CMM and shipping buildings can be placed for layout testing, but routed item movement, calibration and machine-to-machine logistics are not simulated yet. Autosave uses this browser's local storage; it does not sync between devices.</p></div>;
+  return <div className="guide"><h2>THE STARTER CAMPAIGN</h2><ol><li>Choose Powered Drill and click the FE iron deposit.</li><li>Place an Arc Furnace on any free cell. Machines process the shared stock once each tick.</li><li>Wait for 8 steel, open Contracts and ship C-101.</li><li>Open Research and buy Quality for ₡300.</li><li>Find the bright CO coal deposit near the upper-left of the enlarged, scrollable 30 × 18 floor. Place a drill there and watch coal stock rise.</li><li>Use Select / Rotate on conveyors; belt directions are east, south, west and north. Machines animate while running and freeze when paused.</li><li>Ship C-202 to complete the starter loop.</li></ol><h2>BASE-BUILD LIMITS</h2><p>The factory floor is larger than the viewport: scroll the board or touch-scroll it to explore. Conveyors, storage, CMM and shipping buildings can be placed for layout testing, but routed item movement is not simulated yet. Autosave uses this browser's local storage.</p></div>;
 }
 
 createRoot(document.getElementById('root')!).render(<App />);

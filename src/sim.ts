@@ -67,12 +67,14 @@ export interface CampaignObjective { id: string; title: string; instructions: st
 export function campaignProgress(s: GameState): { objective: CampaignObjective; contract: Contract | undefined; researchAction: string } {
   const has = (kind: BuildingKind) => s.grid.some(row => row.some(t => t.kind === kind));
   const hasIronDrill = s.grid.some(row => row.some(t => t.kind === 'drill' && t.item === 'ironOre'));
+  const hasCoalDrill = s.grid.some(row => row.some(t => t.kind === 'drill' && t.item === 'coal'));
   const c101 = s.contracts.find(c => c.id === 'C-101'); const c202 = s.contracts.find(c => c.id === 'C-202');
   const stages: CampaignObjective[] = [
     { id:'drill', title:'Place an iron drill', instructions:'Place a Powered Drill on the iron deposit.', current:hasIronDrill ? 1 : 0, target:1, complete:hasIronDrill },
     { id:'furnace', title:'Place a furnace', instructions:'Place an Arc Furnace anywhere on the floor.', current:has('furnace') ? 1 : 0, target:1, complete:has('furnace') },
     { id:'steel', title:'Ship C-101 steel', instructions:'Produce and ship 8 steel at 65% quality.', current:c101?.done ? 8 : Math.min(8, s.inventory.steel || 0), target:8, complete:!!c101?.done },
     { id:'quality', title:'Unlock Quality', instructions:'Buy the Quality research node for ₡300.', current:s.research.includes('quality') ? 1 : 0, target:1, complete:s.research.includes('quality') },
+    { id:'coal', title:'Secure a coal supply', instructions:'Place a Powered Drill on the nearby CO coal deposit.', current:hasCoalDrill ? 1 : 0, target:1, complete:hasCoalDrill },
     { id:'lathe', title:'Reach 78% quality', instructions:'Place a Manual Lathe and produce shafts.', current:has('lathe') ? Math.min(78, s.quality) : 0, target:78, complete:has('lathe') && s.quality >= 78 },
     { id:'shafts', title:'Ship C-202 shafts', instructions:'Produce and ship 4 shafts at 78% quality.', current:c202?.done ? 4 : Math.min(4, s.inventory.shaft || 0), target:4, complete:!!c202?.done },
   ];
@@ -80,16 +82,27 @@ export function campaignProgress(s: GameState): { objective: CampaignObjective; 
   return { objective, contract: objective.id === 'steel' ? c101 : objective.id === 'shafts' ? c202 : undefined, researchAction: objective.id === 'quality' ? 'QUALITY · ₡300' : 'No research required now' };
 }
 
-const W = 18;
-const H = 12;
+export const GRID_WIDTH = 30;
+export const GRID_HEIGHT = 18;
+export type BeltDirection = 'east' | 'south' | 'west' | 'north';
+export function beltDirection(rot: number): BeltDirection { return (['east', 'south', 'west', 'north'] as const)[((rot % 4) + 4) % 4]; }
+const LEGACY_GRID_WIDTH = 18;
+const LEGACY_GRID_HEIGHT = 12;
 const TOOLS: Tool[] = ['select', 'place', 'demolish'];
 const BUILDING_KINDS: BuildingKind[] = ['drill', 'furnace', 'lathe', 'conveyor', 'storage', 'assembler', 'cmm', 'shipping'];
 const ITEMS: Item[] = ['ironOre', 'copperOre', 'coal', 'stone', 'steel', 'copper', 'shaft', 'gear', 'precisionAssembly'];
-const DEPOSITS = [
+const LEGACY_DEPOSITS = [
   [2, 2, 'ironOre'],
   [4, 8, 'copperOre'],
   [14, 3, 'coal'],
   [13, 9, 'stone'],
+] as const satisfies readonly (readonly [number, number, Item])[];
+const DEPOSITS = [
+  ...LEGACY_DEPOSITS,
+  [6, 2, 'ironOre'],
+  [20, 8, 'copperOre'],
+  [5, 4, 'coal'],
+  [24, 14, 'stone'],
 ] as const satisfies readonly (readonly [number, number, Item])[];
 
 export const BUILDINGS: Record<BuildingKind, { label: string; cost: number; power: number; color: string }> = {
@@ -104,7 +117,7 @@ export const BUILDINGS: Record<BuildingKind, { label: string; cost: number; powe
 };
 
 export function newGame(): GameState {
-  const grid: Tile[][] = Array.from({ length: H }, () => Array.from({ length: W }, () => ({ rot: 0 })));
+  const grid: Tile[][] = Array.from({ length: GRID_HEIGHT }, () => Array.from({ length: GRID_WIDTH }, () => ({ rot: 0 })));
   for (const [x, y, item] of DEPOSITS) grid[y][x] = { rot: 0, item, amount: 999 };
   return {
     tick: 0,
@@ -219,7 +232,7 @@ export function fulfillContract(s: GameState, id: string): FulfillResult {
 }
 
 export function save(s: GameState): string {
-  return JSON.stringify({ ...s, version: 2 });
+  return JSON.stringify({ ...s, version: 3 });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -234,25 +247,37 @@ function isIntegerInRange(value: unknown, minimum: number, maximum: number): val
   return Number.isInteger(value) && (value as number) >= minimum && (value as number) <= maximum;
 }
 
-function migrateVersionOne(data: Record<string, unknown>): void {
-  if (data.version !== 1 || !Array.isArray(data.grid)) return;
-  for (const [x, y, item] of DEPOSITS) {
-    const row = data.grid[y];
-    if (!Array.isArray(row)) continue;
-    const tile = row[x];
-    if (!isRecord(tile)) continue;
-    if (tile.item === undefined) tile.item = item;
-    if (tile.amount === undefined) tile.amount = 999;
+function migrateLegacy(data: Record<string, unknown>): void {
+  if ((data.version !== 1 && data.version !== 2) || !Array.isArray(data.grid)) return;
+  const oldGrid = data.grid;
+  if (oldGrid.length !== LEGACY_GRID_HEIGHT || !oldGrid.every(row => Array.isArray(row) && row.length === LEGACY_GRID_WIDTH)) return;
+  const occupiedLegacyCells = new Set<string>();
+  for (let y = 0; y < oldGrid.length; y++) for (let x = 0; x < oldGrid[y].length; x++) {
+    const tile = oldGrid[y][x];
+    if (isRecord(tile) && (tile.kind !== undefined || tile.item !== undefined)) occupiedLegacyCells.add(`${x},${y}`);
   }
-  for (const row of data.grid) {
-    if (!Array.isArray(row)) continue;
-    for (const tile of row) {
+  if (data.version === 1) {
+    for (const [x, y, item] of LEGACY_DEPOSITS) {
+      const row = oldGrid[y]; const tile = Array.isArray(row) ? row[x] : undefined;
+      if (isRecord(tile)) { if (tile.item === undefined) tile.item = item; if (tile.amount === undefined) tile.amount = 999; }
+    }
+    for (const row of oldGrid) for (const tile of row) {
       if (!isRecord(tile) || tile.kind !== 'drill' || tile.item !== undefined) continue;
-      delete tile.kind;
-      tile.rot = 0;
+      delete tile.kind; tile.rot = 0;
       if (typeof data.credits === 'number') data.credits += BUILDINGS.drill.cost;
     }
   }
+  data.grid = Array.from({ length: GRID_HEIGHT }, (_, y) => Array.from({ length: GRID_WIDTH }, (_, x) => {
+    const oldTile = y < LEGACY_GRID_HEIGHT && x < LEGACY_GRID_WIDTH ? oldGrid[y][x] : undefined;
+    return isRecord(oldTile) ? oldTile : { rot: 0 };
+  }));
+  for (const [x, y, item] of DEPOSITS) {
+    const tile = (data.grid as unknown[][])[y][x];
+    const isLegacyDeposit = LEGACY_DEPOSITS.some(([legacyX, legacyY]) => legacyX === x && legacyY === y);
+    if (!isLegacyDeposit && occupiedLegacyCells.has(`${x},${y}`)) continue;
+    if (isRecord(tile) && tile.kind === undefined && tile.item === undefined) Object.assign(tile, { item, amount: 999 });
+  }
+  data.version = 3;
 }
 
 function isTile(value: unknown): value is Tile {
@@ -284,14 +309,14 @@ function isInventory(value: unknown): value is Record<string, number> {
   return isRecord(value) && Object.values(value).every(isFiniteNonNegative);
 }
 
-function isGameState(value: unknown): value is GameState & { version: 1 | 2 } {
-  if (!isRecord(value) || (value.version !== 1 && value.version !== 2)) return false;
+function isGameState(value: unknown): value is GameState & { version: 3 } {
+  if (!isRecord(value) || value.version !== 3) return false;
   if (!Number.isInteger(value.tick) || (value.tick as number) < 0) return false;
   if (!isFiniteNonNegative(value.credits) || !isFiniteNonNegative(value.power) || !isFiniteNonNegative(value.reputation)) return false;
   if (!isFiniteNonNegative(value.tutorial) || !isFiniteNonNegative(value.quality) || (value.quality as number) > 100) return false;
   if (!Array.isArray(value.research) || !value.research.every((entry) => typeof entry === 'string')) return false;
-  if (!Array.isArray(value.grid) || value.grid.length !== H) return false;
-  if (!value.grid.every((row) => Array.isArray(row) && row.length === W && row.every(isTile))) return false;
+  if (!Array.isArray(value.grid) || value.grid.length !== GRID_HEIGHT) return false;
+  if (!value.grid.every((row) => Array.isArray(row) && row.length === GRID_WIDTH && row.every(isTile))) return false;
   if (!isInventory(value.inventory)) return false;
   if (!Array.isArray(value.contracts) || !value.contracts.every(isContract)) return false;
   if (typeof value.paused !== 'boolean' || ![1, 2, 3].includes(value.speed as number)) return false;
@@ -302,7 +327,7 @@ function isGameState(value: unknown): value is GameState & { version: 1 | 2 } {
 
 export function load(raw: string): GameState {
   const parsed: unknown = JSON.parse(raw);
-  if (isRecord(parsed)) migrateVersionOne(parsed);
+  if (isRecord(parsed)) migrateLegacy(parsed);
   if (!isGameState(parsed)) throw new Error('Invalid or unsupported save');
   const { version: _version, ...state } = parsed;
   return state;
