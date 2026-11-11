@@ -53,6 +53,33 @@ export interface GameState {
   quality: number;
 }
 
+
+export type ResearchResult = { ok: true; state: GameState } | { ok: false; reason: 'unknown' | 'already-unlocked' | 'insufficient-credits' };
+export const RESEARCH_COST = 300;
+export const RESEARCH_IDS = ['workshop', 'production', 'quality', 'automation', 'materials'] as const;
+export function unlockResearch(s: GameState, id: string): ResearchResult {
+  if (!(RESEARCH_IDS as readonly string[]).includes(id)) return { ok: false, reason: 'unknown' };
+  if (s.research.includes(id)) return { ok: false, reason: 'already-unlocked' };
+  if (s.credits < RESEARCH_COST) return { ok: false, reason: 'insufficient-credits' };
+  const next = structuredClone(s); next.credits -= RESEARCH_COST; next.research.push(id); return { ok: true, state: next };
+}
+export interface CampaignObjective { id: string; title: string; instructions: string; current: number; target: number; complete: boolean; }
+export function campaignProgress(s: GameState): { objective: CampaignObjective; contract: Contract | undefined; researchAction: string } {
+  const has = (kind: BuildingKind) => s.grid.some(row => row.some(t => t.kind === kind));
+  const hasIronDrill = s.grid.some(row => row.some(t => t.kind === 'drill' && t.item === 'ironOre'));
+  const c101 = s.contracts.find(c => c.id === 'C-101'); const c202 = s.contracts.find(c => c.id === 'C-202');
+  const stages: CampaignObjective[] = [
+    { id:'drill', title:'Place an iron drill', instructions:'Place a Powered Drill on the iron deposit.', current:hasIronDrill ? 1 : 0, target:1, complete:hasIronDrill },
+    { id:'furnace', title:'Place a furnace', instructions:'Place an Arc Furnace anywhere on the floor.', current:has('furnace') ? 1 : 0, target:1, complete:has('furnace') },
+    { id:'steel', title:'Ship C-101 steel', instructions:'Produce and ship 8 steel at 65% quality.', current:c101?.done ? 8 : Math.min(8, s.inventory.steel || 0), target:8, complete:!!c101?.done },
+    { id:'quality', title:'Unlock Quality', instructions:'Buy the Quality research node for ₡300.', current:s.research.includes('quality') ? 1 : 0, target:1, complete:s.research.includes('quality') },
+    { id:'lathe', title:'Reach 78% quality', instructions:'Place a Manual Lathe and produce shafts.', current:has('lathe') ? Math.min(78, s.quality) : 0, target:78, complete:has('lathe') && s.quality >= 78 },
+    { id:'shafts', title:'Ship C-202 shafts', instructions:'Produce and ship 4 shafts at 78% quality.', current:c202?.done ? 4 : Math.min(4, s.inventory.shaft || 0), target:4, complete:!!c202?.done },
+  ];
+  const objective = stages.find(x => !x.complete) || { id:'complete', title:'Campaign complete', instructions:'Both starter contracts shipped.', current:1, target:1, complete:true };
+  return { objective, contract: objective.id === 'steel' ? c101 : objective.id === 'shafts' ? c202 : undefined, researchAction: objective.id === 'quality' ? 'QUALITY · ₡300' : 'No research required now' };
+}
+
 const W = 18;
 const H = 12;
 const TOOLS: Tool[] = ['select', 'place', 'demolish'];

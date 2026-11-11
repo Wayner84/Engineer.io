@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BUILDINGS, type BuildingKind, demolish, fulfillContract, load, newGame, place, save, tick } from '../src/sim';
+import { BUILDINGS, type BuildingKind, campaignProgress, demolish, fulfillContract, load, newGame, place, save, tick, unlockResearch } from '../src/sim';
 
 describe('Engineer.io simulation', () => {
   it('starts with deposits and starter economy', () => { const s = newGame(); expect(s.credits).toBe(1200); expect(s.grid[2][2].item).toBe('ironOre'); });
@@ -16,6 +16,33 @@ describe('Engineer.io simulation', () => {
   it('retains the quality-research improvement when a lathe produces a shaft', () => { const s = newGame(); s.research.push('quality'); s.inventory.steel = 1; place(s, 0, 0, 'lathe'); tick(s); expect(s.inventory.shaft).toBe(1); expect(s.quality).toBe(73); });
   it('fulfills a valid contract atomically', () => { const s = newGame(); const c = s.contracts[0]; s.inventory[c.item] = c.qty; s.quality = c.minGrade; expect(fulfillContract(s, c.id).ok).toBe(true); expect(s.inventory[c.item]).toBe(0); expect(s.credits).toBe(1680); expect(s.reputation).toBe(10); expect(c.done).toBe(true); });
   it.each(['low stock', 'low quality', 'expired', 'already done'])('rejects %s contract fulfillment', (reason) => { const s = newGame(); const c = s.contracts[0]; if (reason !== 'low stock') s.inventory[c.item] = c.qty; if (reason === 'low quality') s.quality = c.minGrade - 1; if (reason === 'expired') s.tick = c.deadline; if (reason === 'already done') c.done = true; const before = JSON.stringify(s); expect(fulfillContract(s, c.id).ok).toBe(false); expect(JSON.stringify(s)).toBe(before); });
+  it('unlocks research atomically and rejects invalid purchases', () => {
+    const s = newGame(); const original = JSON.stringify(s);
+    expect(unlockResearch(s, 'unknown')).toEqual({ ok: false, reason: 'unknown' });
+    expect(unlockResearch(s, 'workshop')).toEqual({ ok: false, reason: 'already-unlocked' });
+    s.credits = 299; expect(unlockResearch(s, 'quality')).toEqual({ ok: false, reason: 'insufficient-credits' });
+    expect(s.research).toEqual(['workshop']);
+    const funded = newGame(); const result = unlockResearch(funded, 'quality');
+    expect(result.ok).toBe(true); if (result.ok) { expect(result.state.credits).toBe(900); expect(result.state.research).toContain('quality'); }
+    expect(JSON.stringify(funded)).toBe(original);
+  });
+  it('tracks campaign objectives without being fooled by out-of-order buildings', () => {
+    const s = newGame(); expect(campaignProgress(s).objective.id).toBe('drill');
+    place(s, 0, 0, 'furnace'); place(s, 4, 8, 'drill'); expect(campaignProgress(s).objective.id).toBe('drill');
+    place(s, 2, 2, 'drill'); expect(campaignProgress(s).objective.id).toBe('steel');
+    s.contracts[0].done = true; expect(campaignProgress(s).objective.id).toBe('quality');
+    s.research.push('quality'); expect(campaignProgress(s).objective.id).toBe('lathe');
+    place(s, 1, 0, 'lathe'); s.quality = 78; expect(campaignProgress(s).objective.id).toBe('shafts');
+    s.contracts[1].done = true; expect(campaignProgress(s).objective.id).toBe('complete');
+  });
+  it('completes the starter campaign through the intended production loop', () => {
+    let s = newGame(); expect(place(s, 2, 2, 'drill')).toBe(true); expect(place(s, 0, 0, 'furnace')).toBe(true);
+    tick(s, 8); expect(s.inventory.steel).toBeGreaterThanOrEqual(8); expect(fulfillContract(s, 'C-101').ok).toBe(true);
+    const research = unlockResearch(s, 'quality'); expect(research.ok).toBe(true); if (!research.ok) throw new Error('research failed'); s = research.state;
+    expect(place(s, 1, 0, 'lathe')).toBe(true); expect(place(s, 14, 3, 'drill')).toBe(true);
+    tick(s, 8); expect(s.quality).toBeGreaterThanOrEqual(78); expect(s.inventory.shaft).toBeGreaterThanOrEqual(4);
+    expect(fulfillContract(s, 'C-202').ok).toBe(true); expect(campaignProgress(s).objective.id).toBe('complete'); expect(s.tick).toBeLessThan(1400);
+  });
   it('round trips persistence with deposits under drills', () => { const s = newGame(); place(s, 2, 2, 'drill'); expect(load(save(s)).grid[2][2]).toMatchObject({ kind: 'drill', item: 'ironOre', amount: 999 }); });
   it('migrates legacy v1 drills and refunds off-deposit placements', () => {
     const legacy = JSON.parse(save(newGame())); legacy.version = 1; legacy.credits = 960; legacy.grid[2][2] = { kind: 'drill', rot: 0 }; legacy.grid[0][0] = { kind: 'drill', rot: 1 };
