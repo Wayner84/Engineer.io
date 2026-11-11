@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   BUILDINGS,
+  RESEARCH,
   GRID_HEIGHT,
   GRID_WIDTH,
   beltDirection,
@@ -115,7 +116,7 @@ function App() {
           context.font = '8px IBM Plex Mono, monospace';
           context.fillText(String(tile.amount ?? 0), px + 5, py + cell - 5);
         }
-        if (tile.kind) {
+        if (tile.kind && tile.kind !== 'conveyor') {
           context.save();
           context.translate(px + cell / 2, py + cell / 2);
           const pulse = tile.kind === 'furnace' ? 1 + Math.sin(animationPhase) * 0.08 : 1;
@@ -126,18 +127,45 @@ function App() {
           context.fillStyle = '#101820'; context.font = 'bold 9px IBM Plex Mono, monospace'; context.textAlign = 'center';
           context.fillText(tile.kind.slice(0, 4).toUpperCase(), 0, 3);
           context.restore();
+          const direction = beltDirection(tile.rot);
+          const [dx, dy] = direction === 'east' ? [1, 0] : direction === 'south' ? [0, 1] : direction === 'west' ? [-1, 0] : [0, -1];
+          context.fillStyle = '#f1c566';
+          context.beginPath();
+          context.moveTo(px + cell / 2 + dx * cell * .4, py + cell / 2 + dy * cell * .4);
+          context.lineTo(px + cell / 2 + dx * cell * .22 - dy * cell * .09, py + cell / 2 + dy * cell * .22 + dx * cell * .09);
+          context.lineTo(px + cell / 2 + dx * cell * .22 + dy * cell * .09, py + cell / 2 + dy * cell * .22 - dx * cell * .09);
+          context.closePath(); context.fill();
         }
         if (tile.kind === 'conveyor') {
-          const directions = { east: '→', south: '↓', west: '←', north: '↑' } as const;
-          context.fillStyle = '#f1c566'; context.font = `bold ${Math.max(16, cell * .45)}px sans-serif`; context.textAlign = 'center';
           const direction = beltDirection(tile.rot);
-          const arrow = directions[direction];
-          const travel = state.paused ? 0.5 : animationPhase % 1;
-          for (const offset of [travel, (travel + 0.5) % 1]) {
-            const along = (offset - 0.5) * cell * 0.65;
-            const ax = px + cell / 2 + (direction === 'east' ? along : direction === 'west' ? -along : 0);
-            const ay = py + cell / 2 + (direction === 'south' ? along : direction === 'north' ? -along : 0);
-            context.fillText(arrow, ax, ay + cell * 0.16);
+          const vertical = direction === 'north' || direction === 'south';
+          const reverse = direction === 'west' || direction === 'north';
+          context.save();
+          context.translate(px + cell / 2, py + cell / 2);
+          if (vertical) context.rotate(Math.PI / 2);
+          context.fillStyle = '#11191f';
+          context.fillRect(-cell * .47, -cell * .34, cell * .94, cell * .68);
+          context.fillStyle = '#70828c';
+          context.fillRect(-cell * .47, -cell * .39, cell * .94, cell * .07);
+          context.fillRect(-cell * .47, cell * .32, cell * .94, cell * .07);
+          context.fillStyle = '#344550';
+          for (let roller = 0; roller < 5; roller++) {
+            const travel = ((roller / 5 + animationPhase * .18) % 1) - .5;
+            const rollerX = (reverse ? -travel : travel) * cell * .88;
+            context.fillRect(rollerX - 2, -cell * .29, 4, cell * .58);
+          }
+          context.restore();
+          if (tile.cargo) {
+            const colors: Record<string, string> = { ironOre:'#9cb6c5', copperOre:'#d9855b', coal:'#59636a', stone:'#b8aa8e', steel:'#d8e2e7', copper:'#db8c62', shaft:'#6dbad5', gear:'#c28fe3', precisionAssembly:'#67d6ae' };
+            const visualProgress = state.paused ? tile.cargo.progress : Math.min(1, tile.cargo.progress + (animationPhase % .3));
+            const along = (visualProgress - .5) * cell * .7;
+            const cargoX = px + cell / 2 + (direction === 'east' ? along : direction === 'west' ? -along : 0);
+            const cargoY = py + cell / 2 + (direction === 'south' ? along : direction === 'north' ? -along : 0);
+            context.fillStyle = colors[tile.cargo.item] || '#f1c566';
+            context.fillRect(cargoX - cell * .18, cargoY - cell * .18, cell * .36, cell * .36);
+            context.strokeStyle = '#f5fbff'; context.strokeRect(cargoX - cell * .18, cargoY - cell * .18, cell * .36, cell * .36);
+            context.fillStyle = '#101820'; context.font = 'bold 7px IBM Plex Mono'; context.textAlign = 'center';
+            context.fillText(tile.cargo.item.slice(0, 3).toUpperCase(), cargoX, cargoY + 2);
           }
         }
       }
@@ -253,11 +281,11 @@ function App() {
               <div className="toolbar">
                 <button aria-pressed={state.mode === 'select'} className={state.mode === 'select' ? 'chosen' : ''} onClick={() => setState((x) => ({ ...x, mode: 'select' }))}>SELECT / ROTATE</button>
                 <button aria-pressed={state.mode === 'demolish'} className={state.mode === 'demolish' ? 'chosen danger' : ''} onClick={() => setState((x) => ({ ...x, mode: 'demolish' }))}>DEMOLISH</button>
-                {(Object.keys(BUILDINGS) as BuildingKind[]).map((kind) => <button key={kind} aria-pressed={state.mode === 'place' && state.selected === kind} className={state.mode === 'place' && state.selected === kind ? 'chosen' : ''} onClick={() => { setState((x) => ({ ...x, mode: 'place', selected: kind })); setNotice(`${BUILDINGS[kind].label} selected${kind === 'conveyor' ? ', facing east' : ''}. Choose a free cell${kind === 'drill' ? ' on a deposit' : ''}.`); }}>{BUILDINGS[kind].label}<small>₡{BUILDINGS[kind].cost}</small></button>)}
+                {(Object.keys(BUILDINGS) as BuildingKind[]).map((kind) => { const locked = !state.research.includes(BUILDINGS[kind].requiredResearch); return <button key={kind} disabled={locked} aria-pressed={state.mode === 'place' && state.selected === kind} className={state.mode === 'place' && state.selected === kind ? 'chosen' : ''} onClick={() => { setState((x) => ({ ...x, mode: 'place', selected: kind })); setNotice(`${BUILDINGS[kind].label} selected${kind === 'conveyor' ? ', facing east' : ''}. Choose a free cell${kind === 'drill' ? ' on a deposit' : ''}.`); }}>{BUILDINGS[kind].label}<small>{locked ? `REQUIRES ${BUILDINGS[kind].requiredResearch}` : `₡${BUILDINGS[kind].cost}`}</small></button>; })}
                 <label>ZOOM <input aria-label="Factory zoom" type="range" min=".7" max="1.4" step=".1" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
               </div>
               <div className="board"><canvas ref={canvasRef} onClick={handleCanvasClick} aria-label={`Interactive ${GRID_WIDTH} by ${GRID_HEIGHT} factory floor`} /><div className="legend"><span>{state.mode === 'place' ? 'PLACEMENT MODE' : state.mode === 'demolish' ? 'DEMOLITION MODE' : 'SELECT / ROTATE MODE'}</span><span>BELTS: 0 EAST · 1 SOUTH · 2 WEST · 3 NORTH · SELECT/ROTATE</span><span>COAL: high-contrast CO deposit · TICK {state.tick}</span></div></div>
-              <section className="panels"><div><h3>STOCK CONTROL <i>LIVE</i></h3><div className="stock">{Object.entries(state.inventory).map(([key, value]) => <span key={key}><b>{names[key] || key}</b><strong>{value}</strong></span>)}</div></div><div><h3>HOW PRODUCTION WORKS</h3><p>Every active machine reads from the shared stock inventory once per tick. Drills extract their deposit, furnaces consume ore and coal, and lathes turn steel into shafts. Conveyors are visual planning tools in this base build; routed logistics are a later milestone.</p></div></section>
+              <section className="panels"><div><h3>STOCK CONTROL <i>LIVE</i></h3><div className="stock">{Object.entries(state.inventory).map(([key, value]) => <span key={key}><b>{names[key] || key}</b><strong>{value}</strong></span>)}</div></div><div><h3>HOW PRODUCTION WORKS</h3><p>Every active machine reads from the shared stock inventory once per tick. Drills extract their deposit, furnaces consume ore and coal, and lathes turn steel into shafts. Conveyors route real crates into racks and shipping docks; blocked belts wait safely and pause freezes movement.</p></div></section>
             </>
           ) : tab === 'research' ? <Research state={state} setState={setState} setNotice={setNotice} /> : tab === 'orders' ? <Orders state={state} setState={setState} setNotice={setNotice} /> : <Guide />}
         </main>
@@ -267,34 +295,29 @@ function App() {
 }
 
 function Research({ state, setState, setNotice }: { state: GameState; setState: React.Dispatch<React.SetStateAction<GameState>>; setNotice: React.Dispatch<React.SetStateAction<string>> }) {
-  const rows = [
-    ['workshop', 'WORKSHOP', 'Hand tools, storage racks and manual machining'],
-    ['production', 'PRODUCTION', 'Furnaces, alloy control and casting recipes'],
-    ['quality', 'QUALITY', 'Process improvement, sampling and metrology'],
-    ['automation', 'AUTOMATION', 'Belts, inserters and robotic cells'],
-    ['materials', 'MATERIALS', 'Tool steel, copper alloys and precision stock'],
-  ];
+
   function purchase(id: string, title: string) {
     setState((current) => {
       const result = unlockResearch(current, id);
       if (!result.ok) {
-        setNotice(result.reason === 'insufficient-credits' ? `Not enough credits for ${title}. Research costs ₡300.` : result.reason === 'already-unlocked' ? `${title} is already unlocked.` : 'Unknown research node.');
+        setNotice(result.reason === 'insufficient-credits' ? `Not enough credits for ${title}.` : result.reason === 'prerequisite' ? `${title} is locked: complete its prerequisites first.` : result.reason === 'already-unlocked' ? `${title} is already unlocked.` : 'Unknown research node.');
         return current;
       }
       setNotice(`${title} research unlocked.`);
       return result.state;
     });
   }
-  return <div className="research">{rows.map(([id, title, description], index) => { const unlocked = state.research.includes(id); return <article className={unlocked ? 'unlocked' : ''} key={id}><div className="node">{index + 1}</div><div><h2>{title} {unlocked && <em>UNLOCKED</em>}</h2><p>{description}</p></div><button disabled={unlocked} onClick={() => purchase(id, title)}>{unlocked ? 'ACTIVE' : state.credits < 300 ? 'NEED ₡300' : '₡300 RESEARCH'}</button></article>; })}</div>;
+  return <div className="research">{Object.values(RESEARCH).map((node, index) => { const unlocked = state.research.includes(node.id); const ready = node.prerequisites.every((p) => state.research.includes(p)); return <article className={unlocked ? 'unlocked' : ready ? 'available' : 'locked'} key={node.id}><div className="node">{index + 1}</div><div><h2>{node.label} {unlocked && <em>UNLOCKED</em>}</h2><p>{node.description}</p><p><b>Prerequisites:</b> {node.prerequisites.join(', ') || 'none'} · <b>Effects:</b> {node.effects.join(' ')}</p></div><button disabled={unlocked || !ready} onClick={() => purchase(node.id, node.label)}>{unlocked ? 'ACTIVE' : !ready ? 'LOCKED' : `₡${node.cost} RESEARCH`}</button></article>; })}</div>;
 }
 
 function Orders({ state, setState, setNotice }: { state: GameState; setState: React.Dispatch<React.SetStateAction<GameState>>; setNotice: React.Dispatch<React.SetStateAction<string>> }) {
+  const hasDock = state.grid.some((row) => row.some((tile) => tile.kind === 'shipping'));
   function ship(id: string) {
     setState((current) => {
       const next = structuredClone(current);
       const result = fulfillContract(next, id);
       if (!result.ok) {
-        const messages = { missing: 'Contract not found.', done: 'That contract is already fulfilled.', stock: 'Not enough finished stock.', quality: 'Quality is below the contract requirement.', expired: 'The contract deadline has passed.' };
+        const messages = { missing: 'Contract not found.', done: 'That contract is already fulfilled.', stock: 'Not enough finished stock.', quality: 'Quality is below the contract requirement.', expired: 'The contract deadline has passed.', locked: 'Research or reputation requirements are not yet met.' };
         setNotice(messages[result.reason]);
         return current;
       }
@@ -302,11 +325,20 @@ function Orders({ state, setState, setNotice }: { state: GameState; setState: Re
       return next;
     });
   }
-  return <div className="orders">{state.contracts.map((contract) => { const expired = !contract.done && state.tick >= contract.deadline; const stock = state.inventory[contract.item] || 0; const blocked = expired || stock < contract.qty || state.quality < contract.minGrade; return <article key={contract.id}><div><span className="eyebrow">{contract.id} / DELIVERY ORDER</span><h2>{names[contract.item]} × {contract.qty}</h2><p>Stock {stock}/{contract.qty} · Minimum quality <b>{contract.minGrade}%</b> · Deadline tick {contract.deadline} {expired && <b>· EXPIRED</b>}</p></div><div className="reward">₡ {contract.reward}<button disabled={contract.done || blocked} onClick={() => ship(contract.id)}>{contract.done ? 'FULFILLED' : expired ? 'EXPIRED' : 'SHIP ORDER'}</button></div></article>; })}</div>;
+  return <div className="orders"><p className={`dock-status ${hasDock ? 'online' : ''}`}>{hasDock ? 'SHIPPING DOCK ONLINE · Belt deliveries auto-dispatch the first eligible order.' : 'NO SHIPPING DOCK · Orders can be dispatched manually; build a dock for automatic belt dispatch.'}</p>{state.contracts.map((contract) => {
+    const expired = !contract.done && state.tick >= contract.deadline;
+    const stock = state.inventory[contract.item] || 0;
+    const researchLocked = !!contract.requiredResearch && !state.research.includes(contract.requiredResearch);
+    const reputationLocked = contract.minReputation !== undefined && state.reputation < contract.minReputation;
+    const locked = researchLocked || reputationLocked;
+    const blocked = locked || expired || stock < contract.qty || state.quality < contract.minGrade;
+    const status = contract.done ? 'FULFILLED' : locked ? 'LOCKED' : expired ? 'EXPIRED' : stock < contract.qty ? 'NEED STOCK' : state.quality < contract.minGrade ? 'NEED QUALITY' : 'READY';
+    return <article className={locked ? 'locked' : contract.done ? 'unlocked' : ''} key={contract.id}><div><span className="eyebrow">{contract.id} / {status}</span><h2>{names[contract.item]} × {contract.qty}</h2><p>Stock {stock}/{contract.qty} · Minimum quality <b>{contract.minGrade}%</b> · Deadline tick {contract.deadline}</p>{locked && <p className="requirements">Requires {contract.requiredResearch || 'current research'}{contract.minReputation !== undefined ? ` · reputation ${contract.minReputation}` : ''}</p>}</div><div className="reward">₡ {contract.reward}<button disabled={contract.done || blocked} onClick={() => ship(contract.id)}>{contract.done ? 'FULFILLED' : status}</button></div></article>;
+  })}</div>;
 }
 
 function Guide() {
-  return <div className="guide"><h2>THE STARTER CAMPAIGN</h2><ol><li>Choose Powered Drill and click the FE iron deposit.</li><li>Place an Arc Furnace on any free cell. Machines process the shared stock once each tick.</li><li>Wait for 8 steel, open Contracts and ship C-101.</li><li>Open Research and buy Quality for ₡300.</li><li>Find the bright CO coal deposit near the upper-left of the enlarged, scrollable 30 × 18 floor. Place a drill there and watch coal stock rise.</li><li>Use Select / Rotate on conveyors; belt directions are east, south, west and north. Machines animate while running and freeze when paused.</li><li>Ship C-202 to complete the starter loop.</li></ol><h2>BASE-BUILD LIMITS</h2><p>The factory floor is larger than the viewport: scroll the board or touch-scroll it to explore. Conveyors, storage, CMM and shipping buildings can be placed for layout testing, but routed item movement is not simulated yet. Autosave uses this browser's local storage.</p></div>;
+  return <div className="guide"><h2>THE STARTER CAMPAIGN</h2><ol><li>Choose Powered Drill and click the FE iron deposit.</li><li>Place an Arc Furnace on any free cell. Without a connected belt, machine output goes into shared stock automatically.</li><li>Wait for 8 steel, open Contracts and ship C-101.</li><li>Open Research and buy Quality for ₡300.</li><li>Place the coal drill and a lathe to make high-quality shafts, then ship C-202.</li><li>To automate logistics, rotate a machine toward the first conveyor. Each belt follows its own direction and can turn a route into a Stock Rack or Shipping Dock.</li><li>Crates are real stock: racks unload them into inventory, while docks unload and automatically dispatch the first eligible contract.</li></ol><h2>EXPANDING THE FACTORY</h2><p>Research unlocks faster belts, gear cutting, assemblers, metrology and advanced contracts. Locked shop tools show the required research. Gears are produced after Gear Cutting when the gear contract is active; assemblers combine gears and copper into precision assemblies. Autosave uses this browser's local storage.</p></div>;
 }
 
 createRoot(document.getElementById('root')!).render(<App />);
