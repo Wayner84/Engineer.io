@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BUILDINGS, GRID_HEIGHT, GRID_WIDTH, RESEARCH, type BuildingKind, beltDirection, campaignProgress, demolish, fulfillContract, load, newGame, place, save, tick, unlockResearch } from '../src/sim';
+import { BUILDINGS, CUSTOMER_CATALOGUE, GRID_HEIGHT, GRID_WIDTH, RESEARCH, SUPPLIER_OFFERS, type BuildingKind, beltDirection, buyStock, campaignProgress, customerName, demolish, fulfillContract, load, newGame, place, rotateCustomerContracts, save, sellStock, tick, unlockResearch } from '../src/sim';
 
 describe('Engineer.io simulation', () => {
   it('routes real cargo along belts into a shipping dock and auto-dispatches', () => {
@@ -148,14 +148,82 @@ describe('Engineer.io simulation', () => {
     expect(migrated.grid[4][5]).toEqual({ rot: 0 });
     expect(migrated.grid[2][6]).toEqual({ kind: 'furnace', rot: 3 });
     expect(migrated.credits).toBe(1080);
-    expect(JSON.parse(save(migrated)).version).toBe(5);
+    expect(JSON.parse(save(migrated)).version).toBe(6);
   });
   it('migrates valid v2 18x12 saves into the enlarged map without overwriting old state', () => {
     const legacy = JSON.parse(save(newGame())); legacy.version = 2; legacy.grid = legacy.grid.slice(0, 12).map((row: unknown[]) => row.slice(0, 18)); legacy.grid[0][0] = { kind: 'furnace', rot: 2 }; legacy.inventory.coal = 37;
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.grid).toHaveLength(18); expect(migrated.grid[0]).toHaveLength(30); expect(migrated.grid[0][0]).toMatchObject({ kind: 'furnace', rot: 2 }); expect(migrated.inventory.coal).toBe(37); expect(JSON.parse(save(migrated)).version).toBe(5);
+    expect(migrated.grid).toHaveLength(18); expect(migrated.grid[0]).toHaveLength(30); expect(migrated.grid[0][0]).toMatchObject({ kind: 'furnace', rot: 2 }); expect(migrated.inventory.coal).toBe(37); expect(JSON.parse(save(migrated)).version).toBe(6);
   });
   it('rejects malformed current v3 dimensions', () => { const current = JSON.parse(save(newGame())); current.grid = current.grid.slice(0, 17); expect(() => load(JSON.stringify(current))).toThrow(); });
+  it('rotates a bounded deterministic set of customer contracts', () => {
+    const s = newGame();
+    expect(s.contracts.filter((contract) => contract.sequence !== undefined).map((contract) => contract.id)).toEqual(['R-0000', 'R-0001', 'R-0002']);
+    s.contracts.find((contract) => contract.id === 'R-0000')!.done = true;
+    rotateCustomerContracts(s);
+    const rotating = s.contracts.filter((contract) => contract.sequence !== undefined);
+    expect(rotating.map((contract) => contract.id)).toEqual(['R-0001', 'R-0002', 'R-0003']);
+    expect(rotating).toHaveLength(3);
+    expect(s.contractSequence).toBe(4);
+  });
+  it('replenishes completed rotating contracts on the next simulation tick', () => {
+    const s = newGame();
+    s.contracts.find((contract) => contract.id === 'R-0000')!.done = true;
+    tick(s);
+    expect(s.contracts.filter((contract) => contract.sequence !== undefined).map((contract) => contract.id)).toEqual(['R-0001', 'R-0002', 'R-0003']);
+  });
+  it('exposes exactly 1,000 unique deterministic customer names', () => {
+    expect(CUSTOMER_CATALOGUE).toHaveLength(1000);
+    expect(new Set(CUSTOMER_CATALOGUE).size).toBe(1000);
+    expect(customerName(0)).toBe(CUSTOMER_CATALOGUE[0]);
+    expect(customerName(1000)).toBe(CUSTOMER_CATALOGUE[0]);
+    expect(customerName(-1)).toBe(CUSTOMER_CATALOGUE[999]);
+  });
+  it('purchases supplier stock with exact weighted grade, credits, and commerce totals', () => {
+    const s = newGame();
+    s.inventory.steel = 5;
+    s.stockQuality.steel = { quantity: 5, average: 90 };
+    const offer = SUPPLIER_OFFERS.find((candidate) => candidate.id === 'steel')!;
+    expect(buyStock(s, offer.id, 2)).toEqual({ ok: true, total: 420 });
+    expect(s.credits).toBe(780);
+    expect(s.inventory.steel).toBe(15);
+    expect(s.stockQuality.steel).toEqual({ quantity: 15, average: 84.66666666666667 });
+    expect(s.commerce).toEqual({ unitsBought: 10, unitsSold: 0, directRevenue: 0, directSpend: 420 });
+  });
+  it('sells stock directly without reputation and rejects failed sales atomically', () => {
+    const s = newGame();
+    s.inventory.steel = 3;
+    s.stockQuality.steel = { quantity: 3, average: 80 };
+    expect(sellStock(s, 'steel', 2)).toEqual({ ok: true, total: 228 });
+    expect(s.credits).toBe(1428);
+    expect(s.inventory.steel).toBe(1);
+    expect(s.stockQuality.steel).toEqual({ quantity: 1, average: 80 });
+    expect(s.reputation).toBe(0);
+    expect(s.commerce).toEqual({ unitsBought: 0, unitsSold: 2, directRevenue: 228, directSpend: 0 });
+    const before = structuredClone(s);
+    expect(sellStock(s, 'steel', 2)).toEqual({ ok: false, reason: 'insufficient-stock' });
+    expect(s).toEqual(before);
+  });
+  it('migrates genuine v5 commerce defaults and deterministic rotating contracts', () => {
+    const legacy = JSON.parse(save(newGame()));
+    legacy.version = 5;
+    legacy.schemaVersion = 5;
+    delete legacy.commerce;
+    delete legacy.contractSequence;
+    legacy.contracts = legacy.contracts.filter((contract: { sequence?: number }) => contract.sequence === undefined);
+    for (const contract of legacy.contracts) {
+      delete contract.customer;
+      delete contract.starter;
+      delete contract.sequence;
+    }
+    legacy.contracts[0].done = true;
+    const migrated = load(JSON.stringify(legacy));
+    expect(migrated.schemaVersion).toBe(6);
+    expect(migrated.commerce).toEqual({ unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 });
+    expect(migrated.contracts.find((contract) => contract.id === 'C-101')!.done).toBe(true);
+    expect(migrated.contracts.filter((contract) => contract.sequence !== undefined).map((contract) => contract.id)).toEqual(['R-0000', 'R-0001', 'R-0002']);
+    expect(migrated.contractSequence).toBe(3);
+  });
   it('fails safely for malformed or unsupported saves', () => {
     expect(() => load('{bad')).toThrow();
     expect(() => load(JSON.stringify({ version: 99 }))).toThrow();
@@ -196,6 +264,6 @@ describe('shop-floor quality milestone', () => {
     const { newGame, save, load } = await import('../src/sim');
     const legacy = JSON.parse(save(newGame())); legacy.version = 4;
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.schemaVersion).toBe(5); expect(migrated.stats.attempted).toBe(0);
+    expect(migrated.schemaVersion).toBe(6); expect(migrated.stats.attempted).toBe(0);
   });
 });

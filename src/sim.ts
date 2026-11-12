@@ -52,6 +52,9 @@ export interface Contract {
   minCpk?: number;
   minSamples?: number;
   inspectionLevel?: 'basic' | 'traceable' | 'certified';
+  customer?: string;
+  starter?: boolean;
+  sequence?: number;
 }
 
 export interface GameState {
@@ -72,8 +75,31 @@ export interface GameState {
   stockQuality: Partial<Record<Item, StockQuality>>;
   stats: ProductionStats;
   spc: Partial<Record<Item, SpcData>>;
-  schemaVersion: 5;
+  commerce: { unitsBought: number; unitsSold: number; directRevenue: number; directSpend: number };
+  contractSequence: number;
+  schemaVersion: 6;
 }
+
+const CUSTOMER_NAMES = Array.from({ length: 1000 }, (_, i) => {
+  const prefixes = ['Aster','Beacon','Cobalt','Delta','Everest','Forge','Granite','Helix','Ion','Juniper','Keystone','Lattice',' Meridian','Northstar','Orbit','Pioneer','Quantum','Redwood','Summit','Tandem'];
+  const suffixes = ['Works','Dynamics','Fabrication','Industries','Systems','Machining','Aerospace','Medical','Foundry','Precision'];
+  return `${prefixes[Math.floor(i / suffixes.length) % prefixes.length].trim()} ${suffixes[i % suffixes.length]} ${String(Math.floor(i / 200) + 1).padStart(2, '0')}`;
+});
+export function customerName(index: number): string { return CUSTOMER_NAMES[((Math.trunc(index) % CUSTOMER_NAMES.length) + CUSTOMER_NAMES.length) % CUSTOMER_NAMES.length]; }
+export const CUSTOMER_CATALOGUE = [...CUSTOMER_NAMES];
+
+export interface SupplierOffer { id: string; supplier: string; item: Item; packQty: number; price: number; grade: number }
+export const SUPPLIER_OFFERS: SupplierOffer[] = [
+  { id:'iron-ore', supplier:'Redwood Mineral Co.', item:'ironOre', packQty:10, price:90, grade:72 },
+  { id:'copper-ore', supplier:'Cobalt Ridge Metals', item:'copperOre', packQty:10, price:120, grade:74 },
+  { id:'coal', supplier:'Granite Carbon Supply', item:'coal', packQty:12, price:80, grade:70 },
+  { id:'stone', supplier:'Beacon Aggregate', item:'stone', packQty:12, price:55, grade:76 },
+  { id:'steel', supplier:'Aster Steel Service', item:'steel', packQty:5, price:210, grade:82 },
+];
+const SALE_PRICES: Partial<Record<Item, number>> = { steel:120, copper:105, shaft:180, gear:260, machinedPlate:240, bracket:320, precisionHousing:520, precisionAssembly:700 };
+export type CommerceResult = { ok:true; total:number } | { ok:false; reason:'unknown-offer'|'invalid-quantity'|'insufficient-credits'|'unsaleable-item'|'insufficient-stock' };
+export function buyStock(s: GameState, offerId: string, packs: number): CommerceResult { const o=SUPPLIER_OFFERS.find(x=>x.id===offerId); if(!o)return{ok:false,reason:'unknown-offer'}; if(!Number.isInteger(packs)||packs<1)return{ok:false,reason:'invalid-quantity'}; const total=o.price*packs; if(s.credits<total)return{ok:false,reason:'insufficient-credits'}; const qty=o.packQty*packs; const old=s.inventory[o.item]||0; const q=s.stockQuality[o.item]; s.credits-=total; s.inventory[o.item]=old+qty; s.stockQuality[o.item]={quantity:old+qty,average:q?(q.average*old+o.grade*qty)/(old+qty):o.grade}; s.commerce.unitsBought+=qty; s.commerce.directSpend+=total; return{ok:true,total}; }
+export function sellStock(s: GameState, item: Item, quantity: number): CommerceResult { const unit=SALE_PRICES[item]; if(!unit)return{ok:false,reason:'unsaleable-item'}; if(!Number.isInteger(quantity)||quantity<1)return{ok:false,reason:'invalid-quantity'}; if((s.inventory[item]||0)<quantity)return{ok:false,reason:'insufficient-stock'}; const grade=s.stockQuality[item]?.average??s.quality; const total=Math.floor(unit*quantity*(0.75+grade/400)); s.inventory[item]-=quantity; if(s.stockQuality[item]){if(s.stockQuality[item]!.quantity<=quantity)delete s.stockQuality[item];else s.stockQuality[item]!.quantity-=quantity;} s.credits+=total; s.commerce.unitsSold+=quantity; s.commerce.directRevenue+=total; return{ok:true,total}; }
 
 
 export interface ResearchNode { id: string; label: string; cost: number; prerequisites: string[]; description: string; effects: string[]; unlocks?: BuildingKind[]; }
@@ -175,7 +201,7 @@ export const BUILDINGS: Record<BuildingKind, { label: string; cost: number; powe
 };
 
 const CONTRACT_TEMPLATES: Contract[] = [
-  { id: 'C-101', item: 'steel', qty: 8, minGrade: 65, reward: 480, deadline: 900, done: false, sector:'regular', inspectionLevel:'basic' },
+  { id: 'C-101', item: 'steel', qty: 8, minGrade: 65, reward: 480, deadline: 900, done: false, sector:'regular', inspectionLevel:'basic', customer:customerName(0), starter:true },
   { id: 'C-202', item: 'shaft', qty: 4, minGrade: 78, reward: 720, deadline: 1400, done: false, sector:'regular', inspectionLevel:'basic' },
   { id: 'C-303', item: 'copper', qty: 6, minGrade: 70, reward: 520, deadline: 1800, done: false, requiredResearch: 'copper', minReputation: 10 },
   { id: 'C-404', item: 'gear', qty: 3, minGrade: 75, reward: 900, deadline: 2400, done: false, requiredResearch: 'gearing', minReputation: 20 },
@@ -191,6 +217,39 @@ const CONTRACT_TEMPLATES: Contract[] = [
   { id: 'M-303', item:'shaft', qty:8, minGrade:90, reward:2800, deadline:5800, done:false, sector:'medical', requiredResearch:'medicalCertification', minCpk:1.5, minSamples:8, inspectionLevel:'traceable' },
 ];
 
+const ROTATING_CONTRACT_LIMIT = 3;
+const ROTATING_CONTRACTS = [
+  { item: 'steel', qty: 4, minGrade: 68, reward: 300 },
+  { item: 'shaft', qty: 2, minGrade: 76, reward: 420 },
+  { item: 'copper', qty: 4, minGrade: 72, reward: 390, requiredResearch: 'copper' },
+] as const;
+
+function makeRotatingContract(sequence: number, tick: number): Contract {
+  const offer = ROTATING_CONTRACTS[sequence % ROTATING_CONTRACTS.length];
+  return {
+    ...offer,
+    id: `R-${String(sequence).padStart(4, '0')}`,
+    deadline: tick + 900 + (sequence % ROTATING_CONTRACTS.length) * 150,
+    done: false,
+    sector: 'regular',
+    inspectionLevel: 'basic',
+    minReputation: 20,
+    customer: customerName(sequence + 100),
+    starter: false,
+    sequence,
+  };
+}
+
+export function rotateCustomerContracts(s: GameState): void {
+  const active = s.contracts.filter((contract) => contract.sequence !== undefined && !contract.done && s.tick < contract.deadline);
+  s.contracts = s.contracts.filter((contract) => contract.sequence === undefined);
+  while (active.length < ROTATING_CONTRACT_LIMIT) {
+    active.push(makeRotatingContract(s.contractSequence, s.tick));
+    s.contractSequence++;
+  }
+  s.contracts.push(...active.slice(0, ROTATING_CONTRACT_LIMIT));
+}
+
 export function newGame(): GameState {
   const grid: Tile[][] = Array.from({ length: GRID_HEIGHT }, () => Array.from({ length: GRID_WIDTH }, () => ({ rot: 0 })));
   for (const [x, y, item] of DEPOSITS) grid[y][x] = { rot: 0, item, amount: 999 };
@@ -202,14 +261,17 @@ export function newGame(): GameState {
     research: ['workshop'],
     grid,
     inventory: { ironOre: 12, copperOre: 8, coal: 10, stone: 10 },
-    contracts: structuredClone(CONTRACT_TEMPLATES),
+    contracts: [
+      ...structuredClone(CONTRACT_TEMPLATES).map((c, i) => ({ ...c, customer: c.customer || customerName(i), starter: i < 2 })),
+      ...[0, 1, 2].map((sequence) => makeRotatingContract(sequence, 0)),
+    ],
     paused: false,
     speed: 1,
     selected: null,
     mode: 'select',
     tutorial: 0,
     quality: 72,
-    stockQuality: {}, spc: {}, stats: { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }, schemaVersion: 5,
+    stockQuality: {}, spc: {}, stats: { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }, commerce: { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }, contractSequence: 3, schemaVersion: 6,
   };
 }
 
@@ -388,6 +450,7 @@ export function tick(s: GameState, steps = 1): void {
   if (s.paused) return;
   for (let i = 0; i < steps; i++) {
     s.tick++;
+    rotateCustomerContracts(s);
     advanceCargo(s);
     const powerUsed = processMachines(s);
     if (s.research.includes('automation') && s.tick % 2 === 0) processMachines(s);
@@ -429,7 +492,7 @@ export function fulfillContract(s: GameState, id: string): FulfillResult {
 }
 
 export function save(s: GameState): string {
-  return JSON.stringify({ ...s, version: 5, schemaVersion: 5 });
+  return JSON.stringify({ ...s, version: 6, schemaVersion: 6 });
 }
 
 export type ServiceResult = { ok: true; cost: number } | { ok: false; reason: 'invalid' | 'already-good' | 'insufficient-credits' };
@@ -460,13 +523,26 @@ function mergeContractTemplates(value: unknown): Contract[] {
   });
 }
 
+function migrateCommerceContracts(value: unknown, tick: unknown): Contract[] {
+  const currentTick = Number.isInteger(tick) && (tick as number) >= 0 ? tick as number : 0;
+  return [
+    ...mergeContractTemplates(value).map((contract, index) => ({
+      ...contract,
+      customer: contract.customer || customerName(index),
+      starter: contract.starter ?? (contract.id === 'C-101' || contract.id === 'C-202'),
+    })),
+    ...[0, 1, 2].map((sequence) => makeRotatingContract(sequence, currentTick)),
+  ];
+}
+
 function migrateLegacy(data: Record<string, unknown>): void {
-  if (data.version === 4) { data.schemaVersion = 5; data.stockQuality = data.stockQuality || {}; data.spc = data.spc || {}; data.stats = data.stats || { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }; if (Array.isArray(data.grid)) for (const row of data.grid) if (Array.isArray(row)) for (const tile of row) if (isRecord(tile) && tile.kind && !['conveyor','storage','shipping'].includes(tile.kind as string) && tile.condition === undefined) { tile.condition = 100; tile.cycle = 0; } data.contracts = mergeContractTemplates(data.contracts); data.version = 5; return; }
+  if (data.version === 5) { data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contracts = migrateCommerceContracts(data.contracts, data.tick); data.contractSequence = 3; data.version = 6; data.schemaVersion = 6; return; }
+  if (data.version === 4) { data.schemaVersion = 5; data.stockQuality = data.stockQuality || {}; data.spc = data.spc || {}; data.stats = data.stats || { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }; if (Array.isArray(data.grid)) for (const row of data.grid) if (Array.isArray(row)) for (const tile of row) if (isRecord(tile) && tile.kind && !['conveyor','storage','shipping'].includes(tile.kind as string) && tile.condition === undefined) { tile.condition = 100; tile.cycle = 0; } data.contracts = migrateCommerceContracts(data.contracts, data.tick); data.version = 6; data.schemaVersion = 6; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3; return; }
   if ((data.version !== 1 && data.version !== 2 && data.version !== 3) || !Array.isArray(data.grid)) return;
   if (data.version === 3 && data.grid.length === GRID_HEIGHT) {
     data.stockQuality = data.stockQuality || {}; data.spc = data.spc || {}; data.stats = data.stats || { attempted: 0, accepted: 0, rejected: 0, scrap: 0 };
-    data.contracts = mergeContractTemplates(data.contracts);
-    data.version = 5; data.schemaVersion = 5;
+    data.contracts = migrateCommerceContracts(data.contracts, data.tick);
+    data.version = 6; data.schemaVersion = 6; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3;
     return;
   }
   const oldGrid = data.grid;
@@ -497,8 +573,8 @@ function migrateLegacy(data: Record<string, unknown>): void {
     if (!isLegacyDeposit && occupiedLegacyCells.has(`${x},${y}`)) continue;
     if (isRecord(tile) && tile.kind === undefined && tile.item === undefined) Object.assign(tile, { item, amount: 999 });
   }
-  data.contracts = mergeContractTemplates(data.contracts);
-  data.version = 5; data.schemaVersion = 5;
+  data.contracts = migrateCommerceContracts(data.contracts, data.tick);
+  data.version = 6; data.schemaVersion = 6; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3;
 }
 
 function isTile(value: unknown): value is Tile {
@@ -533,8 +609,8 @@ function isInventory(value: unknown): value is Record<string, number> {
   return isRecord(value) && Object.values(value).every(isFiniteNonNegative);
 }
 
-function isGameState(value: unknown): value is GameState & { version: 5 } {
-  if (!isRecord(value) || value.version !== 5 || value.schemaVersion !== 5) return false;
+function isGameState(value: unknown): value is GameState & { version: 6 } {
+  if (!isRecord(value) || value.version !== 6 || value.schemaVersion !== 6) return false;
   if (!Number.isInteger(value.tick) || (value.tick as number) < 0) return false;
   if (!isFiniteNonNegative(value.credits) || !isFiniteNonNegative(value.power) || !isFiniteNonNegative(value.reputation)) return false;
   if (!isFiniteNonNegative(value.tutorial) || !isFiniteNonNegative(value.quality) || (value.quality as number) > 100) return false;
@@ -546,6 +622,8 @@ function isGameState(value: unknown): value is GameState & { version: 5 } {
   if (!isRecord(value.spc) || !Object.values(value.spc).every(v => isRecord(v) && isIntegerInRange(v.count, 0, Number.MAX_SAFE_INTEGER) && isFiniteNonNegative(v.mean) && isFiniteNonNegative(v.m2) && isFiniteNonNegative(v.standardDeviation) && (v.cpk === null || isFiniteNonNegative(v.cpk)))) return false;
   if (!isRecord(value.stats) || !['attempted','accepted','rejected','scrap'].every(k => { const n = (value.stats as Record<string, unknown>)[k]; return Number.isInteger(n) && (n as number) >= 0; }) || (value.stats as any).attempted !== (value.stats as any).accepted + (value.stats as any).rejected || (value.stats as any).scrap !== (value.stats as any).rejected) return false;
   if (!Array.isArray(value.contracts) || !value.contracts.every(isContract)) return false;
+  if (!isRecord(value.commerce) || !['unitsBought','unitsSold','directRevenue','directSpend'].every(k => isFiniteNonNegative((value.commerce as Record<string, unknown>)[k]))) return false;
+  if (!Number.isInteger(value.contractSequence) || (value.contractSequence as number) < 0) return false;
   if (typeof value.paused !== 'boolean' || ![1, 2, 3].includes(value.speed as number)) return false;
   if (value.selected !== null && !BUILDING_KINDS.includes(value.selected as BuildingKind)) return false;
   if (!TOOLS.includes(value.mode as Tool)) return false;

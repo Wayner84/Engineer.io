@@ -22,6 +22,7 @@ import {
   unlockResearch,
   capability,
   meetsContract,
+  buyStock, sellStock, SUPPLIER_OFFERS,
 } from './sim';
 import './style.css';
 
@@ -46,9 +47,9 @@ const deposits: Record<string, { short: string; color: string }> = {
 
 const itemIcons: Record<string,string> = { ironOre:'⛏', copperOre:'◉', coal:'◆', stone:'⬟', steel:'▣', copper:'◎', shaft:'│', gear:'⚙', precisionAssembly:'✦', machinedPlate:'▤', bracket:'⌜', precisionHousing:'⬢' };
 const buildingUI: Record<BuildingKind,{icon:string;group:string;desc:string;recipe?:string}> = { drill:{icon:'⛏',group:'RESOURCES',desc:'Extract deposits'}, furnace:{icon:'♨',group:'RESOURCES',desc:'Refine ore',recipe:'ORE + COAL → STEEL'}, lathe:{icon:'◉',group:'MANUAL MACHINING',desc:'Turn shafts',recipe:'STEEL → SHAFT'}, mill:{icon:'▤',group:'MANUAL MACHINING',desc:'Cut plates',recipe:'STEEL → PLATE'}, cncLathe:{icon:'◉',group:'CNC / AUTOMATION',desc:'Automated turning',recipe:'STEEL → SHAFT'}, cncMill:{icon:'▦',group:'CNC / AUTOMATION',desc:'Precision milling',recipe:'STEEL → HOUSING'}, conveyor:{icon:'➜',group:'LOGISTICS',desc:'Move cargo'}, storage:{icon:'▥',group:'LOGISTICS',desc:'Stock finished goods'}, assembler:{icon:'⚙',group:'CNC / AUTOMATION',desc:'Combine components'}, cmm:{icon:'⌁',group:'QUALITY',desc:'Scan variation'}, shipping:{icon:'⇥',group:'LOGISTICS',desc:'Dispatch contracts'} };
-type Tab = 'factory' | 'research' | 'orders' | 'spc' | 'help';
+type Tab = 'factory' | 'research' | 'orders' | 'store' | 'spc' | 'help';
 
-function App() {
+export function App() {
   const [state, setState] = useState<GameState>(() => {
     try {
       return load(localStorage.getItem('engineer-save') || '');
@@ -59,9 +60,11 @@ function App() {
   const [tab, setTab] = useState<Tab>('factory');
   const [notice, setNotice] = useState('Select a machine, then click the factory floor.');
   const [zoom, setZoom] = useState(1);
+  const [catalogueOpen, setCatalogueOpen] = useState(true);
   const [animationPhase, setAnimationPhase] = useState(0);
   const [inspected, setInspected] = useState<{ x: number; y: number } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const boardRef = useRef<HTMLDivElement>(null);
   const campaign = campaignProgress(state);
 
   useEffect(() => {
@@ -262,6 +265,11 @@ function App() {
     if (campaign.objective.id === 'steel' || campaign.objective.id === 'shafts') setTab('orders');
   }
 
+  function fitFactory() {
+    const available = boardRef.current?.clientWidth ?? window.innerWidth - 20;
+    setZoom(Math.max(.25, Math.min(1.4, available / (GRID_WIDTH * 44))));
+  }
+
   const actionLabel = campaign.objective.id === 'quality'
     ? 'OPEN RESEARCH'
     : campaign.objective.id === 'steel' || campaign.objective.id === 'shafts'
@@ -278,7 +286,7 @@ function App() {
         <aside>
           <button className={tab === 'factory' ? 'active' : ''} onClick={() => setTab('factory')}>▦ FACTORY FLOOR</button>
           <button className={tab === 'research' ? 'active' : ''} onClick={() => setTab('research')}>◇ RESEARCH</button>
-          <button className={tab === 'orders' ? 'active' : ''} onClick={() => setTab('orders')}>▤ CONTRACTS</button>
+          <button className={tab === 'orders' ? 'active' : ''} onClick={() => setTab('orders')}>▤ CONTRACTS</button><button className={tab === 'store' ? 'active' : ''} onClick={() => setTab('store')}>▥ STORE / MARKET</button>
           <button className={tab === 'spc' ? 'active' : ''} onClick={() => setTab('spc')}>◈ SPC / QUALITY</button>
           <button className={tab === 'help' ? 'active' : ''} onClick={() => setTab('help')}>? FIELD GUIDE</button>
           <div className="side-bottom">
@@ -289,7 +297,7 @@ function App() {
         </aside>
         <main>
           <div className="topline">
-            <div><span className="eyebrow">CAMPAIGN / GARAGE WORKSHOP</span><h1>{tab === 'factory' ? 'Production floor' : tab === 'research' ? 'Capability roadmap' : tab === 'orders' ? 'Active contracts' : tab === 'spc' ? 'SPC / quality control' : 'Operator field guide'}</h1></div>
+            <div><span className="eyebrow">CAMPAIGN / GARAGE WORKSHOP</span><h1>{tab === 'factory' ? 'Production floor' : tab === 'research' ? 'Capability roadmap' : tab === 'orders' ? 'Active contracts' : tab === 'store' ? 'Store / Market' : tab === 'spc' ? 'SPC / quality control' : 'Operator field guide'}</h1></div>
             <div className="kpis">{[['⚡','POWER',`${state.power} kW`,state.power<10?'warn':'good'],['◈','CAPABILITY',`${state.quality}%`,state.quality<70?'warn':'good'],['✓','YIELD',`${state.stats.attempted ? Math.round(state.stats.accepted/state.stats.attempted*100) : 100}%`,'good'],['▥','SCRAP',String(state.stats.scrap),state.stats.scrap?'warn':'good'],['★','REPUTATION',String(state.reputation),'good']].map(([icon,label,value,tone])=><div className={`kpi-card ${tone}`} key={label}><span className="kpi-icon">{icon}</span><span><small>{label}</small><b>{value}</b></span><i className="pulse" /></div>)}</div>
           </div>
 
@@ -302,16 +310,21 @@ function App() {
 
           {tab === 'factory' ? (
             <>
+              <div className="compact-sim-controls" aria-label="Simulation controls">
+                <button onClick={() => setState((x) => ({ ...x, paused: !x.paused }))}>{state.paused ? '▶ RESUME' : 'Ⅱ PAUSE'}</button>
+                <button onClick={() => setState((x) => ({ ...x, speed: x.speed === 3 ? 1 : x.speed + 1 }))}>SPEED ×{state.speed}</button>
+              </div>
               <div className="toolbar">
                 <button aria-pressed={state.mode === 'select'} className={state.mode === 'select' ? 'chosen' : ''} onClick={() => setState((x) => ({ ...x, mode: 'select' }))}>SELECT / ROTATE</button>
                 <button aria-pressed={state.mode === 'demolish'} className={state.mode === 'demolish' ? 'chosen danger' : ''} onClick={() => setState((x) => ({ ...x, mode: 'demolish' }))}>DEMOLISH</button>
-                <div className="catalogue">{(['RESOURCES','MANUAL MACHINING','CNC / AUTOMATION','QUALITY','LOGISTICS'] as const).map(group => <section className="catalogue-group" key={group}><h3>{group}</h3><div className="machine-grid">{(Object.keys(BUILDINGS) as BuildingKind[]).filter(kind => buildingUI[kind].group === group).map(kind => { const b=BUILDINGS[kind], ui=buildingUI[kind], locked=!state.research.includes(b.requiredResearch); return <button className={`machine-card ${state.mode==='place'&&state.selected===kind?'chosen':''}`} key={kind} disabled={locked} onClick={() => { setState(x=>({...x,mode:'place',selected:kind})); setNotice(`${b.label} selected. Choose a free cell.`); }}><span className="icon-tile">{ui.icon}</span><span className="machine-copy"><b>{b.label}</b><small>{ui.desc}</small>{ui.recipe&&<small className="recipe">{ui.recipe}</small>}<small>₡{b.cost} · {b.power} kW · {locked?`LOCKED: ${b.requiredResearch}`:'ONLINE'}</small></span></button>})}</div></section>)}</div>
-                <label>ZOOM <input aria-label="Factory zoom" type="range" min=".7" max="1.4" step=".1" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
+                <button className="catalogue-toggle" aria-expanded={catalogueOpen} onClick={() => setCatalogueOpen((open) => !open)}>{catalogueOpen ? 'COLLAPSE MACHINES' : 'EXPAND MACHINES'}</button>
+                <div className="catalogue" hidden={!catalogueOpen}>{(['RESOURCES','MANUAL MACHINING','CNC / AUTOMATION','QUALITY','LOGISTICS'] as const).map(group => <section className="catalogue-group" key={group}><h3>{group}</h3><div className="machine-grid">{(Object.keys(BUILDINGS) as BuildingKind[]).filter(kind => buildingUI[kind].group === group).map(kind => { const b=BUILDINGS[kind], ui=buildingUI[kind], locked=!state.research.includes(b.requiredResearch); return <button className={`machine-card ${state.mode==='place'&&state.selected===kind?'chosen':''}`} key={kind} disabled={locked} onClick={() => { setState(x=>({...x,mode:'place',selected:kind})); setNotice(`${b.label} selected. Choose a free cell.`); }}><span className="icon-tile">{ui.icon}</span><span className="machine-copy"><b>{b.label}</b><small>{ui.desc}</small>{ui.recipe&&<small className="recipe">{ui.recipe}</small>}<small>₡{b.cost} · {b.power} kW · {locked?`LOCKED: ${b.requiredResearch}`:'ONLINE'}</small></span></button>})}</div></section>)}</div>
+                <div className="view-controls" aria-label="Factory view controls"><button onClick={fitFactory}>FIT</button><button aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(.25, value - .1))}>−</button><button aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(1.4, value + .1))}>+</button><label>ZOOM <input aria-label="Factory zoom" type="range" min=".25" max="1.4" step=".05" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label></div>
               </div>
-              <div className="board"><canvas ref={canvasRef} onClick={handleCanvasClick} aria-label={`Interactive ${GRID_WIDTH} by ${GRID_HEIGHT} factory floor`} /><div className="legend"><span>{state.mode === 'place' ? 'PLACEMENT MODE' : state.mode === 'demolish' ? 'DEMOLITION MODE' : 'SELECT / ROTATE MODE'}</span><span>BELTS: 0 EAST · 1 SOUTH · 2 WEST · 3 NORTH · SELECT/ROTATE</span><span>COAL: high-contrast CO deposit · TICK {state.tick}</span></div></div>
+              <div className="board" ref={boardRef}><canvas ref={canvasRef} onClick={handleCanvasClick} aria-label={`Interactive ${GRID_WIDTH} by ${GRID_HEIGHT} factory floor`} /><div className="legend"><span>{state.mode === 'place' ? 'PLACEMENT MODE' : state.mode === 'demolish' ? 'DEMOLITION MODE' : 'SELECT / ROTATE MODE'}</span><span>BELTS: 0 EAST · 1 SOUTH · 2 WEST · 3 NORTH · SELECT/ROTATE</span><span>COAL: high-contrast CO deposit · TICK {state.tick}</span></div></div>
               <section className="panels"><div><h3>STOCK CONTROL <i>LIVE</i></h3><div className="stock">{Object.entries(state.inventory).map(([key, value]) => { const q=state.stockQuality[key as Item]; return <span className="stock-card" key={key}><em>{itemIcons[key]||'◇'}</em><b>{names[key] || key}</b><strong>{value}</strong><small>AVG {q?.average?.toFixed(0) || state.quality}%</small></span>})}</div></div><div><h3>HOW PRODUCTION WORKS</h3><p>Every active machine reads from shared stock. Condition degrades with cycles; CMM scans build samples and Cpk. Manual machining is flexible, while CNC trades research cost for tighter variation.</p></div></section>{inspected && <Inspector state={state} setState={setState} setNotice={setNotice} position={inspected} />}
             </>
-          ) : tab === 'research' ? <Research state={state} setState={setState} setNotice={setNotice} /> : tab === 'orders' ? <Orders state={state} setState={setState} setNotice={setNotice} /> : tab === 'spc' ? <Quality state={state} /> : <Guide />}
+          ) : tab === 'research' ? <Research state={state} setState={setState} setNotice={setNotice} /> : tab === 'orders' ? <Orders state={state} setState={setState} setNotice={setNotice} /> : tab === 'store' ? <Store state={state} setState={setState} setNotice={setNotice} /> : tab === 'spc' ? <Quality state={state} /> : <Guide />}
         </main>
       </div>
     </div>
@@ -366,7 +379,12 @@ function Orders({ state, setState, setNotice }: { state: GameState; setState: Re
       return next;
     });
   }
-  return <div className="orders"><p className={`dock-status ${hasDock ? 'online' : ''}`}>{hasDock ? 'SHIPPING DOCK ONLINE · Belt deliveries auto-dispatch the first eligible order.' : 'NO SHIPPING DOCK · Orders can be dispatched manually; build a dock for automatic belt dispatch.'}</p>{state.contracts.map((contract) => {
+  const sectors = [
+    { id: 'regular', label: '▣ STANDARD COMMERCIAL' },
+    { id: 'aerospace', label: '✈ AEROSPACE' },
+    { id: 'medical', label: '✚ MEDICAL' },
+  ] as const;
+  return <div className="orders"><p className={`dock-status ${hasDock ? 'online' : ''}`}>{hasDock ? 'SHIPPING DOCK ONLINE · Belt deliveries auto-dispatch the first eligible order.' : 'NO SHIPPING DOCK · Orders can be dispatched manually; build a dock for automatic belt dispatch.'}</p>{sectors.map((sector) => <section className="contract-sector" key={sector.id}><h2>{sector.label}</h2>{state.contracts.filter((contract) => (contract.sector || 'regular') === sector.id).map((contract) => {
     const expired = !contract.done && state.tick >= contract.deadline;
     const stock = state.inventory[contract.item] || 0;
     const researchLocked = !!contract.requiredResearch && !state.research.includes(contract.requiredResearch);
@@ -375,8 +393,14 @@ function Orders({ state, setState, setNotice }: { state: GameState; setState: Re
     const check = meetsContract(state, contract);
     const blocked = !check.ok;
     const status = contract.done ? 'FULFILLED' : expired ? 'EXPIRED' : check.ok ? 'READY TO SHIP' : check.reason === 'stock' ? 'NEED STOCK' : check.reason === 'quality' ? 'NEED GRADE' : check.reason === 'inspection' ? 'NEED SAMPLES' : check.reason === 'capability' ? 'NEED CPK' : check.reason === 'locked' ? 'CERTIFICATION LOCKED' : 'NEED STOCK';
-    return <article className={`sector-${contract.sector || 'regular'} ${locked ? 'locked' : contract.done ? 'unlocked' : ''}`} key={contract.id}><div><span className="sector-badge">{contract.sector === 'aerospace' ? '✈ AEROSPACE' : contract.sector === 'medical' ? '✚ MEDICAL' : '▣ REGULAR'}</span><span className="eyebrow"> {contract.id} / {status}</span><h2>{itemIcons[contract.item]||'◇'} {names[contract.item]} × {contract.qty}</h2><p>Stock <b>{stock}/{contract.qty}</b> · Grade <b>{state.stockQuality[contract.item]?.average?.toFixed(0) || state.quality}% / {contract.minGrade}%</b> · Samples <b>{state.spc[contract.item]?.count || 0}/{contract.minSamples || 0}</b> · Cpk <b>{state.spc[contract.item]?.cpk?.toFixed(2) || '—'} / {contract.minCpk || '—'}</b></p><p>Inspection: {contract.inspectionLevel || 'basic'} · Deadline tick {contract.deadline} · Research: {contract.requiredResearch || 'none'}</p></div><div className="reward">₡ {contract.reward}<button disabled={contract.done || blocked} onClick={() => ship(contract.id)}>{contract.done ? 'FULFILLED' : status}</button></div></article>;
-  })}</div>;
+    return <article className={`sector-${contract.sector || 'regular'} ${locked ? 'locked' : contract.done ? 'unlocked' : ''}`} key={contract.id}><div><p className="customer">CUSTOMER: {contract.customer || 'UNASSIGNED'}</p><span className="sector-badge">{contract.sector === 'aerospace' ? '✈ AEROSPACE' : contract.sector === 'medical' ? '✚ MEDICAL' : '▣ REGULAR'}</span><span className="eyebrow"> {contract.id} / {status}</span><h2>{itemIcons[contract.item]||'◇'} {names[contract.item]} × {contract.qty}</h2><p>Stock <b>{stock}/{contract.qty}</b> · Grade <b>{state.stockQuality[contract.item]?.average?.toFixed(0) || state.quality}% / {contract.minGrade}%</b> · Samples <b>{state.spc[contract.item]?.count || 0}/{contract.minSamples || 0}</b> · Cpk <b>{state.spc[contract.item]?.cpk?.toFixed(2) || '—'} / {contract.minCpk || '—'}</b></p><p>Inspection: {contract.inspectionLevel || 'basic'} · Deadline tick {contract.deadline} · Research: {contract.requiredResearch || 'none'}</p></div><div className="reward">₡ {contract.reward}<button disabled={contract.done || blocked} onClick={() => ship(contract.id)}>{contract.done ? 'FULFILLED' : status}</button></div></article>;
+  })}</section>)}</div>;
+}
+
+function Store({ state, setState, setNotice }: { state: GameState; setState: React.Dispatch<React.SetStateAction<GameState>>; setNotice: React.Dispatch<React.SetStateAction<string>> }) {
+  const sellable = ['steel','copper','shaft','gear','machinedPlate','bracket','precisionHousing','precisionAssembly'] as Item[];
+  const act = (fn: (s: GameState) => { ok: boolean; total?: number; reason?: string }) => setState(current => { const next=structuredClone(current); const r=fn(next); setNotice(r.ok ? `Commerce complete: ₡${r.total}` : `Commerce rejected: ${r.reason}`); return r.ok ? next : current; });
+  return <div className="store"><section><h2>PURCHASE STOCK</h2>{SUPPLIER_OFFERS.map(o=><article className="commerce-card" key={o.id}><div><b>{o.supplier}</b><p>{names[o.item]} · pack {o.packQty} · grade {o.grade}% · ₡{o.price}</p></div><button onClick={()=>act(s=>buyStock(s,o.id,1))}>BUY 1</button><button onClick={()=>act(s=>buyStock(s,o.id,5))}>BUY 5</button></article>)}</section><section><h2>DIRECT SALES</h2><p>Immediate payment; no reputation or certification progress. Contracts pay premiums.</p>{sellable.map(item=><article className="commerce-card" key={item}><div><b>{names[item]}</b><p>Stock {state.inventory[item]||0} · grade {(state.stockQuality[item]?.average??state.quality).toFixed(0)}%</p></div><button onClick={()=>act(s=>sellStock(s,item,1))}>SELL 1</button><button onClick={()=>act(s=>sellStock(s,item,5))}>SELL 5</button><button onClick={()=>act(s=>sellStock(s,item,s.inventory[item]||0))}>SELL ALL</button></article>)}</section><div className="commerce-totals">SPEND ₡{state.commerce.directSpend} · REVENUE ₡{state.commerce.directRevenue} · BOUGHT {state.commerce.unitsBought} · SOLD {state.commerce.unitsSold}</div></div>;
 }
 
 function Quality({ state }: { state: GameState }) {
@@ -388,4 +412,5 @@ function Guide() {
   return <div className="guide"><h2>THE STARTER CAMPAIGN</h2><ol><li>Choose Powered Drill and click the FE iron deposit.</li><li>Place an Arc Furnace on any free cell. Without a connected belt, machine output goes into shared stock automatically.</li><li>Wait for 8 steel, open Contracts and ship C-101.</li><li>Open Research and buy Quality for ₡300.</li><li>Place the coal drill and a lathe to make high-quality shafts, then ship C-202.</li><li>To automate logistics, rotate a machine toward the first conveyor. Each belt follows its own direction and can turn a route into a Stock Rack or Shipping Dock.</li><li>Crates are real stock: racks unload them into inventory, while docks unload and automatically dispatch the first eligible contract.</li></ol><h2>EXPANDING THE FACTORY</h2><p>Research unlocks faster belts, gear cutting, assemblers, metrology and advanced contracts. Locked shop tools show the required research. Gears are produced after Gear Cutting when the gear contract is active; assemblers combine gears and copper into precision assemblies. Autosave uses this browser's local storage.</p></div>;
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+const rootElement = document.getElementById('root');
+if (rootElement) createRoot(rootElement).render(<App />);
