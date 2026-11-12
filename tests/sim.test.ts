@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BLUEPRINTS, BUILDINGS, CUSTOMER_CATALOGUE, GRID_HEIGHT, GRID_WIDTH, RESEARCH, SUPPLIER_OFFERS, type BuildingKind, beltDirection, buyStock, campaignProgress, cancelWorkOrder, createWorkOrder, customerName, demolish, fulfillContract, load, newGame, place, rotateCustomerContracts, save, sellStock, tick, unlockResearch } from '../src/sim';
+import { BLUEPRINTS, BUILDINGS, CUSTOMER_CATALOGUE, GRID_HEIGHT, GRID_WIDTH, RESEARCH, SUPPLIER_OFFERS, type BuildingKind, assignWorkOrder, beltDirection, buyStock, campaignProgress, cancelWorkOrder, createWorkOrder, customerName, demolish, fulfillContract, load, newGame, place, rotateCustomerContracts, save, sellStock, tick, unlockResearch } from '../src/sim';
 
 describe('Engineer.io simulation', () => {
   it('routes real cargo along belts into a shipping dock and auto-dispatches', () => {
@@ -148,12 +148,12 @@ describe('Engineer.io simulation', () => {
     expect(migrated.grid[4][5]).toEqual({ rot: 0 });
     expect(migrated.grid[2][6]).toEqual({ kind: 'furnace', rot: 3 });
     expect(migrated.credits).toBe(1080);
-    expect(JSON.parse(save(migrated)).version).toBe(7);
+    expect(JSON.parse(save(migrated)).version).toBe(8);
   });
   it('migrates valid v2 18x12 saves into the enlarged map without overwriting old state', () => {
     const legacy = JSON.parse(save(newGame())); legacy.version = 2; legacy.grid = legacy.grid.slice(0, 12).map((row: unknown[]) => row.slice(0, 18)); legacy.grid[0][0] = { kind: 'furnace', rot: 2 }; legacy.inventory.coal = 37;
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.grid).toHaveLength(18); expect(migrated.grid[0]).toHaveLength(30); expect(migrated.grid[0][0]).toMatchObject({ kind: 'furnace', rot: 2 }); expect(migrated.inventory.coal).toBe(37); expect(JSON.parse(save(migrated)).version).toBe(7);
+    expect(migrated.grid).toHaveLength(18); expect(migrated.grid[0]).toHaveLength(30); expect(migrated.grid[0][0]).toMatchObject({ kind: 'furnace', rot: 2 }); expect(migrated.inventory.coal).toBe(37); expect(JSON.parse(save(migrated)).version).toBe(8);
   });
   it('rejects malformed current v3 dimensions', () => { const current = JSON.parse(save(newGame())); current.grid = current.grid.slice(0, 17); expect(() => load(JSON.stringify(current))).toThrow(); });
   it('rotates a bounded deterministic set of customer contracts', () => {
@@ -218,7 +218,7 @@ describe('Engineer.io simulation', () => {
     }
     legacy.contracts[0].done = true;
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.schemaVersion).toBe(7);
+    expect(migrated.schemaVersion).toBe(8);
     expect(migrated.commerce).toEqual({ unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 });
     expect(migrated.contracts.find((contract) => contract.id === 'C-101')!.done).toBe(true);
     expect(migrated.contracts.filter((contract) => contract.sequence !== undefined).map((contract) => contract.id)).toEqual(['R-0000', 'R-0001', 'R-0002']);
@@ -252,7 +252,7 @@ describe('Engineer.io simulation', () => {
     expect(s.workOrders).toEqual([{
       id: 'WO-0001', blueprintId: 'BP-SHAFT-01', blueprintRevision: 'A', customer: BLUEPRINTS[0].customer,
       quantity: 5, status: 'queued', operationIndex: 0, reservedItem: 'steel', reservedQuantity: 5,
-      reservedGrade: 82, createdTick: 0,
+      reservedGrade: 82, createdTick: 0, completedQuantity: 0, acceptedQuantity: 0, rejectedQuantity: 0,
     }]);
     expect(s.nextWorkOrder).toBe(2);
   });
@@ -264,10 +264,10 @@ describe('Engineer.io simulation', () => {
     delete legacy.nextWorkOrder;
 
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.schemaVersion).toBe(7);
+    expect(migrated.schemaVersion).toBe(8);
     expect(migrated.workOrders).toEqual([]);
     expect(migrated.nextWorkOrder).toBe(1);
-    expect(JSON.parse(save(migrated)).version).toBe(7);
+    expect(JSON.parse(save(migrated)).version).toBe(8);
   });
   it('cancels a queued work order and restores its exact reserved quantity and grade', () => {
     const s = newGame();
@@ -281,6 +281,42 @@ describe('Engineer.io simulation', () => {
     expect(s.workOrders).toEqual([]);
     expect(s.inventory.steel).toBe(10);
     expect(s.stockQuality.steel).toEqual({ quantity: 10, average: 84 });
+  });
+  it('binds each routed operation to a compatible machine and completes the exact batch', () => {
+    const s = newGame();
+    s.credits = 5000;
+    s.inventory.steel = 5;
+    s.stockQuality.steel = { quantity: 5, average: 82 };
+    expect(place(s, 0, 0, 'lathe')).toBe(true);
+    s.research.push('quality', 'metrology');
+    expect(place(s, 1, 0, 'cmm')).toBe(true);
+    expect(createWorkOrder(s, 'BP-SHAFT-01', 5)).toEqual({ ok: true, workOrderId: 'WO-0001' });
+
+    expect(assignWorkOrder(s, 'WO-0001', 1, 0)).toEqual({ ok: false, reason: 'incompatible-machine' });
+    expect(assignWorkOrder(s, 'WO-0001', 0, 0)).toEqual({ ok: true });
+    const runningSnapshot = structuredClone(s);
+    expect(cancelWorkOrder(s, 'WO-0001')).toEqual({ ok: false, reason: 'active' });
+    expect(s).toEqual(runningSnapshot);
+    tick(s, 5);
+    expect(s.workOrders[0]).toMatchObject({ status: 'queued', operationIndex: 1, completedQuantity: 0, acceptedQuantity: 5, rejectedQuantity: 0 });
+    expect(s.inventory.shaft || 0).toBe(0);
+
+    expect(assignWorkOrder(s, 'WO-0001', 1, 0)).toEqual({ ok: true });
+    tick(s, 5);
+    expect(s.workOrders[0]).toMatchObject({ status: 'completed', operationIndex: 2, completedQuantity: 5, acceptedQuantity: 5, rejectedQuantity: 0 });
+    expect(s.inventory.shaft).toBe(5);
+    expect(s.stockQuality.shaft).toEqual({ quantity: 5, average: 82 });
+    expect(s.grid[0][0].cycle).toBe(5);
+    expect(s.grid[0][1].cycle).toBe(5);
+  });
+  it('migrates schema-v7 queued work orders into unassigned route execution', () => {
+    const legacy = JSON.parse(save(newGame()));
+    legacy.version = 7; legacy.schemaVersion = 7;
+    legacy.workOrders = [{ id:'WO-0001', blueprintId:'BP-SHAFT-01', blueprintRevision:'A', customer:BLUEPRINTS[0].customer, quantity:1, status:'queued', operationIndex:0, reservedItem:'steel', reservedQuantity:1, reservedGrade:82, createdTick:0 }];
+    const migrated = load(JSON.stringify(legacy));
+    expect(migrated.schemaVersion).toBe(8);
+    expect(migrated.workOrders[0]).toMatchObject({ status:'queued', completedQuantity:0, acceptedQuantity:0, rejectedQuantity:0 });
+    expect(JSON.parse(save(migrated)).version).toBe(8);
   });
 });
 
@@ -307,6 +343,6 @@ describe('shop-floor quality milestone', () => {
     const { newGame, save, load } = await import('../src/sim');
     const legacy = JSON.parse(save(newGame())); legacy.version = 4;
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.schemaVersion).toBe(7); expect(migrated.stats.attempted).toBe(0);
+    expect(migrated.schemaVersion).toBe(8); expect(migrated.stats.attempted).toBe(0);
   });
 });
