@@ -58,4 +58,22 @@ describe('responsive factory controls', () => {
       '✚ MEDICAL',
     ]);
   });
+
+  it('purchases material and queues a visible exact-batch blueprint job', async () => {
+    const store = [...host.querySelectorAll('button')].find((node) => node.textContent?.includes('STORE'))!;
+    await act(async () => store.click());
+    const steelOffer = [...host.querySelectorAll('.commerce-card')].find((node) => node.textContent?.includes('Aster Steel Service'))!;
+    await act(async () => ([...steelOffer.querySelectorAll('button')].find((node) => node.textContent === 'BUY 1') as HTMLButtonElement).click());
+
+    const contracts = [...host.querySelectorAll('button')].find((node) => node.textContent?.includes('CONTRACTS'))!;
+    await act(async () => contracts.click());
+    const blueprint = [...host.querySelectorAll('.blueprint-card')].find((node) => node.textContent?.includes('BP-SHAFT-01'))!;
+    expect(blueprint.textContent).toContain('Turn shaft → Final inspection');
+    await act(async () => ([...blueprint.querySelectorAll('button')].find((node) => node.textContent === 'QUEUE 5') as HTMLButtonElement).click());
+    expect(host.querySelector('.work-order-queue')?.textContent).toContain('WO-0001');
+    expect(host.querySelector('.work-order-queue')?.textContent).toContain('BATCH 5');
+    const cancel = [...host.querySelectorAll<HTMLButtonElement>('.work-order-queue button')].find((node) => node.textContent === 'CANCEL & RELEASE')!;
+    await act(async () => cancel.click());
+    expect(host.querySelector('.work-order-queue')?.textContent).toContain('No batches queued.');
+  });
 });

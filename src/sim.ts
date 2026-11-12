@@ -38,6 +38,30 @@ export interface StockQuality { quantity: number; average: number }
 export interface SpcData { count: number; mean: number; m2: number; standardDeviation: number; cpk: number | null }
 export interface ProductionStats { attempted: number; accepted: number; rejected: number; scrap: number }
 
+export interface Blueprint {
+  id: string;
+  revision: string;
+  customer: string;
+  product: Item;
+  material: Item;
+  materialPerUnit: number;
+  requiredGrade: number;
+  operations: readonly { id: string; family: 'turning' | 'milling' | 'inspection'; label: string }[];
+}
+export interface WorkOrder {
+  id: string;
+  blueprintId: string;
+  blueprintRevision: string;
+  customer: string;
+  quantity: number;
+  status: 'queued';
+  operationIndex: number;
+  reservedItem: Item;
+  reservedQuantity: number;
+  reservedGrade: number;
+  createdTick: number;
+}
+
 export interface Contract {
   id: string;
   item: Item;
@@ -77,7 +101,9 @@ export interface GameState {
   spc: Partial<Record<Item, SpcData>>;
   commerce: { unitsBought: number; unitsSold: number; directRevenue: number; directSpend: number };
   contractSequence: number;
-  schemaVersion: 6;
+  workOrders: WorkOrder[];
+  nextWorkOrder: number;
+  schemaVersion: 7;
 }
 
 const CUSTOMER_NAMES = Array.from({ length: 1000 }, (_, i) => {
@@ -87,6 +113,46 @@ const CUSTOMER_NAMES = Array.from({ length: 1000 }, (_, i) => {
 });
 export function customerName(index: number): string { return CUSTOMER_NAMES[((Math.trunc(index) % CUSTOMER_NAMES.length) + CUSTOMER_NAMES.length) % CUSTOMER_NAMES.length]; }
 export const CUSTOMER_CATALOGUE = [...CUSTOMER_NAMES];
+
+export const BLUEPRINTS: Blueprint[] = [
+  { id: 'BP-SHAFT-01', revision: 'A', customer: customerName(40), product: 'shaft', material: 'steel', materialPerUnit: 1, requiredGrade: 75, operations: [{ id: 'turn', family: 'turning', label: 'Turn shaft' }, { id: 'inspect', family: 'inspection', label: 'Final inspection' }] },
+  { id: 'BP-BRACKET-01', revision: 'A', customer: customerName(41), product: 'bracket', material: 'steel', materialPerUnit: 1, requiredGrade: 82, operations: [{ id: 'mill', family: 'milling', label: 'Mill bracket' }, { id: 'inspect', family: 'inspection', label: 'Dimensional inspection' }] },
+];
+export type WorkOrderResult = { ok: true; workOrderId: string } | { ok: false; reason: 'unknown-blueprint' | 'invalid-quantity' | 'insufficient-stock' | 'insufficient-grade' };
+export function createWorkOrder(s: GameState, blueprintId: string, quantity: number): WorkOrderResult {
+  const blueprint = BLUEPRINTS.find((candidate) => candidate.id === blueprintId);
+  if (!blueprint) return { ok: false, reason: 'unknown-blueprint' };
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) return { ok: false, reason: 'invalid-quantity' };
+  const required = blueprint.materialPerUnit * quantity;
+  if ((s.inventory[blueprint.material] || 0) < required) return { ok: false, reason: 'insufficient-stock' };
+  const grade = s.stockQuality[blueprint.material]?.average ?? s.quality;
+  if (grade < blueprint.requiredGrade) return { ok: false, reason: 'insufficient-grade' };
+  const id = `WO-${String(s.nextWorkOrder).padStart(4, '0')}`;
+  s.inventory[blueprint.material] -= required;
+  if (s.stockQuality[blueprint.material]) {
+    if (s.stockQuality[blueprint.material]!.quantity <= required) delete s.stockQuality[blueprint.material];
+    else s.stockQuality[blueprint.material]!.quantity -= required;
+  }
+  s.workOrders.push({ id, blueprintId: blueprint.id, blueprintRevision: blueprint.revision, customer: blueprint.customer, quantity, status: 'queued', operationIndex: 0, reservedItem: blueprint.material, reservedQuantity: required, reservedGrade: grade, createdTick: s.tick });
+  s.nextWorkOrder++;
+  return { ok: true, workOrderId: id };
+}
+export type CancelWorkOrderResult = { ok: true } | { ok: false; reason: 'missing' };
+export function cancelWorkOrder(s: GameState, workOrderId: string): CancelWorkOrderResult {
+  const index = s.workOrders.findIndex((order) => order.id === workOrderId);
+  if (index < 0) return { ok: false, reason: 'missing' };
+  const order = s.workOrders[index];
+  const existingQuantity = s.inventory[order.reservedItem] || 0;
+  const existingGrade = s.stockQuality[order.reservedItem]?.average ?? 0;
+  const restoredQuantity = existingQuantity + order.reservedQuantity;
+  s.inventory[order.reservedItem] = restoredQuantity;
+  s.stockQuality[order.reservedItem] = {
+    quantity: restoredQuantity,
+    average: (existingGrade * existingQuantity + order.reservedGrade * order.reservedQuantity) / restoredQuantity,
+  };
+  s.workOrders.splice(index, 1);
+  return { ok: true };
+}
 
 export interface SupplierOffer { id: string; supplier: string; item: Item; packQty: number; price: number; grade: number }
 export const SUPPLIER_OFFERS: SupplierOffer[] = [
@@ -271,7 +337,7 @@ export function newGame(): GameState {
     mode: 'select',
     tutorial: 0,
     quality: 72,
-    stockQuality: {}, spc: {}, stats: { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }, commerce: { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }, contractSequence: 3, schemaVersion: 6,
+    stockQuality: {}, spc: {}, stats: { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }, commerce: { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }, contractSequence: 3, workOrders: [], nextWorkOrder: 1, schemaVersion: 7,
   };
 }
 
@@ -492,7 +558,7 @@ export function fulfillContract(s: GameState, id: string): FulfillResult {
 }
 
 export function save(s: GameState): string {
-  return JSON.stringify({ ...s, version: 6, schemaVersion: 6 });
+  return JSON.stringify({ ...s, version: 7, schemaVersion: 7 });
 }
 
 export type ServiceResult = { ok: true; cost: number } | { ok: false; reason: 'invalid' | 'already-good' | 'insufficient-credits' };
@@ -536,13 +602,14 @@ function migrateCommerceContracts(value: unknown, tick: unknown): Contract[] {
 }
 
 function migrateLegacy(data: Record<string, unknown>): void {
-  if (data.version === 5) { data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contracts = migrateCommerceContracts(data.contracts, data.tick); data.contractSequence = 3; data.version = 6; data.schemaVersion = 6; return; }
-  if (data.version === 4) { data.schemaVersion = 5; data.stockQuality = data.stockQuality || {}; data.spc = data.spc || {}; data.stats = data.stats || { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }; if (Array.isArray(data.grid)) for (const row of data.grid) if (Array.isArray(row)) for (const tile of row) if (isRecord(tile) && tile.kind && !['conveyor','storage','shipping'].includes(tile.kind as string) && tile.condition === undefined) { tile.condition = 100; tile.cycle = 0; } data.contracts = migrateCommerceContracts(data.contracts, data.tick); data.version = 6; data.schemaVersion = 6; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3; return; }
+  if (data.version === 6) { data.workOrders = []; data.nextWorkOrder = 1; data.version = 7; data.schemaVersion = 7; return; }
+  if (data.version === 5) { data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contracts = migrateCommerceContracts(data.contracts, data.tick); data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1; data.version = 7; data.schemaVersion = 7; return; }
+  if (data.version === 4) { data.stockQuality = data.stockQuality || {}; data.spc = data.spc || {}; data.stats = data.stats || { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }; if (Array.isArray(data.grid)) for (const row of data.grid) if (Array.isArray(row)) for (const tile of row) if (isRecord(tile) && tile.kind && !['conveyor','storage','shipping'].includes(tile.kind as string) && tile.condition === undefined) { tile.condition = 100; tile.cycle = 0; } data.contracts = migrateCommerceContracts(data.contracts, data.tick); data.version = 7; data.schemaVersion = 7; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1; return; }
   if ((data.version !== 1 && data.version !== 2 && data.version !== 3) || !Array.isArray(data.grid)) return;
   if (data.version === 3 && data.grid.length === GRID_HEIGHT) {
     data.stockQuality = data.stockQuality || {}; data.spc = data.spc || {}; data.stats = data.stats || { attempted: 0, accepted: 0, rejected: 0, scrap: 0 };
     data.contracts = migrateCommerceContracts(data.contracts, data.tick);
-    data.version = 6; data.schemaVersion = 6; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3;
+    data.version = 7; data.schemaVersion = 7; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1;
     return;
   }
   const oldGrid = data.grid;
@@ -574,7 +641,7 @@ function migrateLegacy(data: Record<string, unknown>): void {
     if (isRecord(tile) && tile.kind === undefined && tile.item === undefined) Object.assign(tile, { item, amount: 999 });
   }
   data.contracts = migrateCommerceContracts(data.contracts, data.tick);
-  data.version = 6; data.schemaVersion = 6; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3;
+  data.version = 7; data.schemaVersion = 7; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1;
 }
 
 function isTile(value: unknown): value is Tile {
@@ -605,12 +672,31 @@ function isContract(value: unknown): value is Contract {
     && (value.minReputation === undefined || isFiniteNonNegative(value.minReputation));
 }
 
+function isWorkOrder(value: unknown): value is WorkOrder {
+  if (!isRecord(value)) return false;
+  const blueprint = BLUEPRINTS.find((candidate) => candidate.id === value.blueprintId);
+  return !!blueprint
+    && typeof value.id === 'string'
+    && /^WO-\d{4,}$/.test(value.id)
+    && value.blueprintRevision === blueprint.revision
+    && value.customer === blueprint.customer
+    && isIntegerInRange(value.quantity, 1, 100)
+    && value.status === 'queued'
+    && value.operationIndex === 0
+    && value.reservedItem === blueprint.material
+    && value.reservedQuantity === blueprint.materialPerUnit * (value.quantity as number)
+    && isFiniteNonNegative(value.reservedGrade)
+    && (value.reservedGrade as number) <= 100
+    && Number.isInteger(value.createdTick)
+    && (value.createdTick as number) >= 0;
+}
+
 function isInventory(value: unknown): value is Record<string, number> {
   return isRecord(value) && Object.values(value).every(isFiniteNonNegative);
 }
 
-function isGameState(value: unknown): value is GameState & { version: 6 } {
-  if (!isRecord(value) || value.version !== 6 || value.schemaVersion !== 6) return false;
+function isGameState(value: unknown): value is GameState & { version: 7 } {
+  if (!isRecord(value) || value.version !== 7 || value.schemaVersion !== 7) return false;
   if (!Number.isInteger(value.tick) || (value.tick as number) < 0) return false;
   if (!isFiniteNonNegative(value.credits) || !isFiniteNonNegative(value.power) || !isFiniteNonNegative(value.reputation)) return false;
   if (!isFiniteNonNegative(value.tutorial) || !isFiniteNonNegative(value.quality) || (value.quality as number) > 100) return false;
@@ -622,6 +708,8 @@ function isGameState(value: unknown): value is GameState & { version: 6 } {
   if (!isRecord(value.spc) || !Object.values(value.spc).every(v => isRecord(v) && isIntegerInRange(v.count, 0, Number.MAX_SAFE_INTEGER) && isFiniteNonNegative(v.mean) && isFiniteNonNegative(v.m2) && isFiniteNonNegative(v.standardDeviation) && (v.cpk === null || isFiniteNonNegative(v.cpk)))) return false;
   if (!isRecord(value.stats) || !['attempted','accepted','rejected','scrap'].every(k => { const n = (value.stats as Record<string, unknown>)[k]; return Number.isInteger(n) && (n as number) >= 0; }) || (value.stats as any).attempted !== (value.stats as any).accepted + (value.stats as any).rejected || (value.stats as any).scrap !== (value.stats as any).rejected) return false;
   if (!Array.isArray(value.contracts) || !value.contracts.every(isContract)) return false;
+  if (!Array.isArray(value.workOrders) || !value.workOrders.every(isWorkOrder)) return false;
+  if (!Number.isInteger(value.nextWorkOrder) || (value.nextWorkOrder as number) < 1) return false;
   if (!isRecord(value.commerce) || !['unitsBought','unitsSold','directRevenue','directSpend'].every(k => isFiniteNonNegative((value.commerce as Record<string, unknown>)[k]))) return false;
   if (!Number.isInteger(value.contractSequence) || (value.contractSequence as number) < 0) return false;
   if (typeof value.paused !== 'boolean' || ![1, 2, 3].includes(value.speed as number)) return false;

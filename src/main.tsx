@@ -22,7 +22,7 @@ import {
   unlockResearch,
   capability,
   meetsContract,
-  buyStock, sellStock, SUPPLIER_OFFERS,
+  buyStock, sellStock, SUPPLIER_OFFERS, BLUEPRINTS, createWorkOrder, cancelWorkOrder,
 } from './sim';
 import './style.css';
 
@@ -366,6 +366,28 @@ function Research({ state, setState, setNotice }: { state: GameState; setState: 
 
 function Orders({ state, setState, setNotice }: { state: GameState; setState: React.Dispatch<React.SetStateAction<GameState>>; setNotice: React.Dispatch<React.SetStateAction<string>> }) {
   const hasDock = state.grid.some((row) => row.some((tile) => tile.kind === 'shipping'));
+  function queue(blueprintId: string, quantity: number) {
+    setState((current) => {
+      const next = structuredClone(current);
+      const result = createWorkOrder(next, blueprintId, quantity);
+      if (!result.ok) {
+        const messages = { 'unknown-blueprint': 'Blueprint not found.', 'invalid-quantity': 'Batch quantity must be from 1 to 100.', 'insufficient-stock': 'Not enough material to reserve this batch.', 'insufficient-grade': 'Available material grade is below the blueprint requirement.' };
+        setNotice(messages[result.reason]);
+        return current;
+      }
+      setNotice(`${result.workOrderId} queued with its exact material reservation.`);
+      return next;
+    });
+  }
+  function cancel(workOrderId: string) {
+    setState((current) => {
+      const next = structuredClone(current);
+      const result = cancelWorkOrder(next, workOrderId);
+      if (!result.ok) { setNotice('Work order not found.'); return current; }
+      setNotice(`${workOrderId} cancelled; reserved material returned to stock.`);
+      return next;
+    });
+  }
   function ship(id: string) {
     setState((current) => {
       const next = structuredClone(current);
@@ -384,7 +406,7 @@ function Orders({ state, setState, setNotice }: { state: GameState; setState: Re
     { id: 'aerospace', label: '✈ AEROSPACE' },
     { id: 'medical', label: '✚ MEDICAL' },
   ] as const;
-  return <div className="orders"><p className={`dock-status ${hasDock ? 'online' : ''}`}>{hasDock ? 'SHIPPING DOCK ONLINE · Belt deliveries auto-dispatch the first eligible order.' : 'NO SHIPPING DOCK · Orders can be dispatched manually; build a dock for automatic belt dispatch.'}</p>{sectors.map((sector) => <section className="contract-sector" key={sector.id}><h2>{sector.label}</h2>{state.contracts.filter((contract) => (contract.sector || 'regular') === sector.id).map((contract) => {
+  return <div className="orders"><section className="blueprint-register"><h2>CONTROLLED BLUEPRINT REGISTER</h2><p>Choose an exact batch. Material is reserved immediately at its current grade.</p><div className="blueprint-grid">{BLUEPRINTS.map((blueprint) => <article className="blueprint-card" key={blueprint.id}><div><span className="eyebrow">{blueprint.id} · REV {blueprint.revision}</span><h3>{names[blueprint.product]} · {blueprint.customer}</h3><p>{blueprint.operations.map((operation) => operation.label).join(' → ')}</p><p>{names[blueprint.material]} × {blueprint.materialPerUnit}/unit · minimum grade {blueprint.requiredGrade}% · stock {state.inventory[blueprint.material] || 0}</p></div><div><button onClick={() => queue(blueprint.id, 1)}>QUEUE 1</button><button onClick={() => queue(blueprint.id, 5)}>QUEUE 5</button><button onClick={() => queue(blueprint.id, 10)}>QUEUE 10</button></div></article>)}</div></section><section className="work-order-queue"><h2>WORK-ORDER QUEUE</h2>{state.workOrders.length === 0 ? <p>No batches queued.</p> : state.workOrders.map((order) => <article key={order.id}><b>{order.id} · BATCH {order.quantity}</b><span>{order.blueprintId} REV {order.blueprintRevision} · {names[order.reservedItem]} {order.reservedQuantity} reserved at grade {order.reservedGrade.toFixed(0)}% · QUEUED</span><button onClick={() => cancel(order.id)}>CANCEL &amp; RELEASE</button></article>)}</section><p className={`dock-status ${hasDock ? 'online' : ''}`}>{hasDock ? 'SHIPPING DOCK ONLINE · Belt deliveries auto-dispatch the first eligible order.' : 'NO SHIPPING DOCK · Orders can be dispatched manually; build a dock for automatic belt dispatch.'}</p>{sectors.map((sector) => <section className="contract-sector" key={sector.id}><h2>{sector.label}</h2>{state.contracts.filter((contract) => (contract.sector || 'regular') === sector.id).map((contract) => {
     const expired = !contract.done && state.tick >= contract.deadline;
     const stock = state.inventory[contract.item] || 0;
     const researchLocked = !!contract.requiredResearch && !state.research.includes(contract.requiredResearch);

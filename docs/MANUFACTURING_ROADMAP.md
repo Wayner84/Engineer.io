@@ -5,7 +5,8 @@ Scope rule: this document records future systems only; the current UI/SPC batch 
 ## Status and gates
 
 - **Implemented — commerce and customer contracts:** deterministic supplier stock purchases, direct sales, customer identity catalogue, customer-tagged starter contracts, and save schema v6 migration foundation.
-- **Future — jobs and catalogue depth:** customer-specific CNC blueprints and jobs; user-selected batch quantity; multi-operation routings; `WorkOrder` execution; outsourcing; deeper supplier catalogue; rooms/HVAC and power networks.
+- **Implemented — controlled job foundation:** revisioned customer blueprint registry, exact player-selected batch quantities, atomic material/grade reservation, visible queued work orders, and save schema v7 migration/validation.
+- **Future — job execution and catalogue depth:** machine-bound multi-operation routing execution; work-order completion and rejects; outsourcing; deeper supplier catalogue; rooms/HVAC and power networks.
 - **Later — process families:** grinding; forging blanks; sheet-metal bending/rolling/pressing; composite/fibreglass; plastics injection moulding, extrusion and 3D printing; later raw-material production. Gate each family with bounded recipes, tooling, quality distributions, wear, routing and conservation tests.
 - **Later — plant infrastructure:** staged early purchasing of stock versus late vertical integration; power/substation capacity upgrades; sealed temperature-controlled rooms with HVAC and pass-through transport for CMM and composite layup; warehousing extension. Gate: capacity is explicit, room conditions affect eligibility/quality, transport cannot bypass pass-through rules.
 - **Later — consumables and upgrades:** `WaliExpress` tooling/probe tiers with budget effects on life, variation, repeatability and Cpk. Gate: consumable life is finite, replacement is auditable, cheaper tiers never silently create impossible inspection confidence.
