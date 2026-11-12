@@ -48,6 +48,18 @@ export interface Blueprint {
   requiredGrade: number;
   operations: readonly { id: string; family: 'turning' | 'milling' | 'inspection'; label: string }[];
 }
+export interface OperationTrace {
+  operationId: string;
+  family: Blueprint['operations'][number]['family'];
+  machineKind: BuildingKind;
+  machine: { x: number; y: number };
+  startedTick: number;
+  completedTick: number;
+  attempted: number;
+  accepted: number;
+  rejected: number;
+  averageGrade: number;
+}
 export interface WorkOrder {
   id: string;
   blueprintId: string;
@@ -64,6 +76,11 @@ export interface WorkOrder {
   completedQuantity: number;
   acceptedQuantity: number;
   rejectedQuantity: number;
+  operationAcceptedQuantity: number;
+  operationRejectedQuantity: number;
+  operationQualityTotal: number;
+  operationStartedTick?: number;
+  traces: OperationTrace[];
 }
 
 export interface Contract {
@@ -107,7 +124,7 @@ export interface GameState {
   contractSequence: number;
   workOrders: WorkOrder[];
   nextWorkOrder: number;
-  schemaVersion: 8;
+  schemaVersion: 9;
 }
 
 const CUSTOMER_NAMES = Array.from({ length: 1000 }, (_, i) => {
@@ -137,7 +154,7 @@ export function createWorkOrder(s: GameState, blueprintId: string, quantity: num
     if (s.stockQuality[blueprint.material]!.quantity <= required) delete s.stockQuality[blueprint.material];
     else s.stockQuality[blueprint.material]!.quantity -= required;
   }
-  s.workOrders.push({ id, blueprintId: blueprint.id, blueprintRevision: blueprint.revision, customer: blueprint.customer, quantity, status: 'queued', operationIndex: 0, reservedItem: blueprint.material, reservedQuantity: required, reservedGrade: grade, createdTick: s.tick, completedQuantity: 0, acceptedQuantity: 0, rejectedQuantity: 0 });
+  s.workOrders.push({ id, blueprintId: blueprint.id, blueprintRevision: blueprint.revision, customer: blueprint.customer, quantity, status: 'queued', operationIndex: 0, reservedItem: blueprint.material, reservedQuantity: required, reservedGrade: grade, createdTick: s.tick, completedQuantity: 0, acceptedQuantity: 0, rejectedQuantity: 0, operationAcceptedQuantity: 0, operationRejectedQuantity: 0, operationQualityTotal: 0, traces: [] });
   s.nextWorkOrder++;
   return { ok: true, workOrderId: id };
 }
@@ -174,6 +191,7 @@ export function assignWorkOrder(s: GameState, workOrderId: string, x: number, y:
   if (!operation || !OPERATION_MACHINES[operation.family].includes(machine.kind)) return { ok: false, reason: 'incompatible-machine' };
   if (s.workOrders.some((candidate) => candidate.status === 'running' && candidate.machine?.x === x && candidate.machine.y === y)) return { ok: false, reason: 'machine-busy' };
   order.status = 'running'; order.machine = { x, y }; order.completedQuantity = 0;
+  order.operationAcceptedQuantity = 0; order.operationRejectedQuantity = 0; order.operationQualityTotal = 0; order.operationStartedTick = s.tick;
   return { ok: true };
 }
 
@@ -360,7 +378,7 @@ export function newGame(): GameState {
     mode: 'select',
     tutorial: 0,
     quality: 72,
-    stockQuality: {}, spc: {}, stats: { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }, commerce: { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }, contractSequence: 3, workOrders: [], nextWorkOrder: 1, schemaVersion: 8,
+    stockQuality: {}, spc: {}, stats: { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }, commerce: { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }, contractSequence: 3, workOrders: [], nextWorkOrder: 1, schemaVersion: 9,
   };
 }
 
@@ -543,20 +561,38 @@ function processWorkOrders(s: GameState): void {
     const blueprint = BLUEPRINTS.find((candidate) => candidate.id === order.blueprintId);
     const operation = blueprint?.operations[order.operationIndex];
     if (!machine?.kind || !blueprint || !operation || !OPERATION_MACHINES[operation.family].includes(machine.kind)) {
-      order.status = 'queued'; delete order.machine; order.completedQuantity = 0; continue;
+      order.status = 'queued'; delete order.machine; delete order.operationStartedTick; order.completedQuantity = 0;
+      order.operationAcceptedQuantity = 0; order.operationRejectedQuantity = 0; order.operationQualityTotal = 0;
+      continue;
     }
+    const condition = machine.condition ?? 100;
+    const inputGrade = [...order.traces].reverse().find((trace) => trace.family !== 'inspection')?.averageGrade ?? order.reservedGrade;
+    const variation = ((order.createdTick + order.completedQuantity * 17 + order.machine.x * 7 + order.machine.y * 11) % 9) - 4;
+    const cncBonus = machine.kind === 'cncLathe' || machine.kind === 'cncMill' ? 5 : 0;
+    const unitGrade = operation.family === 'inspection'
+      ? inputGrade
+      : Math.max(0, Math.min(100, Math.round(inputGrade + cncBonus - (100 - condition) * 0.35 + variation)));
+    const accepted = operation.family === 'inspection' || unitGrade >= blueprint.requiredGrade;
     machine.cycle = (machine.cycle ?? 0) + 1;
     machine.condition = Math.max(0, (machine.condition ?? 100) - 1);
     order.completedQuantity++;
-    if (operation.family !== 'inspection') order.acceptedQuantity++;
-    if (order.completedQuantity < order.quantity) continue;
+    if (accepted) { order.operationAcceptedQuantity++; order.operationQualityTotal += unitGrade; }
+    else { order.operationRejectedQuantity++; order.rejectedQuantity++; }
+    const operationTarget = order.operationIndex === 0 ? order.quantity : order.acceptedQuantity;
+    if (order.completedQuantity < operationTarget) continue;
+    const averageGrade = order.operationAcceptedQuantity > 0 ? order.operationQualityTotal / order.operationAcceptedQuantity : 0;
+    order.traces.push({ operationId: operation.id, family: operation.family, machineKind: machine.kind, machine: { ...order.machine }, startedTick: order.operationStartedTick ?? s.tick, completedTick: s.tick, attempted: order.completedQuantity, accepted: order.operationAcceptedQuantity, rejected: order.operationRejectedQuantity, averageGrade });
+    if (operation.family !== 'inspection') order.acceptedQuantity = order.operationAcceptedQuantity;
     order.operationIndex++;
     delete order.machine;
-    if (order.operationIndex < blueprint.operations.length) {
+    delete order.operationStartedTick;
+    if (order.operationIndex < blueprint.operations.length && order.acceptedQuantity > 0) {
       order.status = 'queued'; order.completedQuantity = 0;
     } else {
+      order.operationIndex = blueprint.operations.length;
       order.status = 'completed'; order.completedQuantity = order.acceptedQuantity;
-      for (let unit = 0; unit < order.acceptedQuantity; unit++) addStock(s, blueprint.product, order.reservedGrade);
+      const outputGrade = [...order.traces].reverse().find((trace) => trace.family !== 'inspection')?.averageGrade ?? order.reservedGrade;
+      for (let unit = 0; unit < order.acceptedQuantity; unit++) addStock(s, blueprint.product, outputGrade);
     }
   }
 }
@@ -608,7 +644,7 @@ export function fulfillContract(s: GameState, id: string): FulfillResult {
 }
 
 export function save(s: GameState): string {
-  return JSON.stringify({ ...s, version: 8, schemaVersion: 8 });
+  return JSON.stringify({ ...s, version: 9, schemaVersion: 9 });
 }
 
 export type ServiceResult = { ok: true; cost: number } | { ok: false; reason: 'invalid' | 'already-good' | 'insufficient-credits' };
@@ -652,18 +688,27 @@ function migrateCommerceContracts(value: unknown, tick: unknown): Contract[] {
 }
 
 function migrateLegacy(data: Record<string, unknown>): void {
-  if (data.version === 7) {
-    if (Array.isArray(data.workOrders)) for (const order of data.workOrders) if (isRecord(order)) Object.assign(order, { completedQuantity: 0, acceptedQuantity: 0, rejectedQuantity: 0 });
-    data.version = 8; data.schemaVersion = 8; return;
+  if (data.version === 8) {
+    if (Array.isArray(data.workOrders)) for (const value of data.workOrders) if (isRecord(value)) {
+      if (value.status === 'running') { value.status = 'queued'; delete value.machine; value.completedQuantity = 0; }
+      if (value.operationIndex === 0 && value.status !== 'completed') { value.acceptedQuantity = 0; value.rejectedQuantity = 0; }
+      Object.assign(value, { operationAcceptedQuantity: 0, operationRejectedQuantity: 0, operationQualityTotal: 0, traces: [] });
+      delete value.operationStartedTick;
+    }
+    data.version = 9; data.schemaVersion = 9; return;
   }
-  if (data.version === 6) { data.workOrders = []; data.nextWorkOrder = 1; data.version = 8; data.schemaVersion = 8; return; }
-  if (data.version === 5) { data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contracts = migrateCommerceContracts(data.contracts, data.tick); data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1; data.version = 8; data.schemaVersion = 8; return; }
-  if (data.version === 4) { data.stockQuality = data.stockQuality || {}; data.spc = data.spc || {}; data.stats = data.stats || { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }; if (Array.isArray(data.grid)) for (const row of data.grid) if (Array.isArray(row)) for (const tile of row) if (isRecord(tile) && tile.kind && !['conveyor','storage','shipping'].includes(tile.kind as string) && tile.condition === undefined) { tile.condition = 100; tile.cycle = 0; } data.contracts = migrateCommerceContracts(data.contracts, data.tick); data.version = 8; data.schemaVersion = 8; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1; return; }
+  if (data.version === 7) {
+    if (Array.isArray(data.workOrders)) for (const order of data.workOrders) if (isRecord(order)) Object.assign(order, { completedQuantity: 0, acceptedQuantity: 0, rejectedQuantity: 0, operationAcceptedQuantity: 0, operationRejectedQuantity: 0, operationQualityTotal: 0, traces: [] });
+    data.version = 9; data.schemaVersion = 9; return;
+  }
+  if (data.version === 6) { data.workOrders = []; data.nextWorkOrder = 1; data.version = 9; data.schemaVersion = 9; return; }
+  if (data.version === 5) { data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contracts = migrateCommerceContracts(data.contracts, data.tick); data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1; data.version = 9; data.schemaVersion = 9; return; }
+  if (data.version === 4) { data.stockQuality = data.stockQuality || {}; data.spc = data.spc || {}; data.stats = data.stats || { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }; if (Array.isArray(data.grid)) for (const row of data.grid) if (Array.isArray(row)) for (const tile of row) if (isRecord(tile) && tile.kind && !['conveyor','storage','shipping'].includes(tile.kind as string) && tile.condition === undefined) { tile.condition = 100; tile.cycle = 0; } data.contracts = migrateCommerceContracts(data.contracts, data.tick); data.version = 9; data.schemaVersion = 9; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1; return; }
   if ((data.version !== 1 && data.version !== 2 && data.version !== 3) || !Array.isArray(data.grid)) return;
   if (data.version === 3 && data.grid.length === GRID_HEIGHT) {
     data.stockQuality = data.stockQuality || {}; data.spc = data.spc || {}; data.stats = data.stats || { attempted: 0, accepted: 0, rejected: 0, scrap: 0 };
     data.contracts = migrateCommerceContracts(data.contracts, data.tick);
-    data.version = 8; data.schemaVersion = 8; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1;
+    data.version = 9; data.schemaVersion = 9; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1;
     return;
   }
   const oldGrid = data.grid;
@@ -695,7 +740,7 @@ function migrateLegacy(data: Record<string, unknown>): void {
     if (isRecord(tile) && tile.kind === undefined && tile.item === undefined) Object.assign(tile, { item, amount: 999 });
   }
   data.contracts = migrateCommerceContracts(data.contracts, data.tick);
-  data.version = 8; data.schemaVersion = 8; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1;
+  data.version = 9; data.schemaVersion = 9; data.commerce = data.commerce || { unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 }; data.contractSequence = 3; data.workOrders = []; data.nextWorkOrder = 1;
 }
 
 function isTile(value: unknown): value is Tile {
@@ -746,16 +791,42 @@ function isWorkOrder(value: unknown): value is WorkOrder {
     && isIntegerInRange(value.completedQuantity, 0, value.quantity as number)
     && isIntegerInRange(value.acceptedQuantity, 0, value.quantity as number)
     && isIntegerInRange(value.rejectedQuantity, 0, value.quantity as number)
+    && isIntegerInRange(value.operationAcceptedQuantity, 0, value.quantity as number)
+    && isIntegerInRange(value.operationRejectedQuantity, 0, value.quantity as number)
+    && isFiniteNonNegative(value.operationQualityTotal)
+    && (value.operationQualityTotal as number) <= (value.quantity as number) * 100
+    && Array.isArray(value.traces)
+    && value.traces.length <= blueprint.operations.length
+    && value.traces.every((trace, index) => isOperationTrace(trace, blueprint.operations[index]))
+    && (value.operationStartedTick === undefined || (Number.isInteger(value.operationStartedTick) && (value.operationStartedTick as number) >= 0))
     && ((value.status === 'running') === isRecord(value.machine))
+    && ((value.status === 'running') === (value.operationStartedTick !== undefined))
     && (value.machine === undefined || (isIntegerInRange((value.machine as Record<string, unknown>).x, 0, GRID_WIDTH - 1) && isIntegerInRange((value.machine as Record<string, unknown>).y, 0, GRID_HEIGHT - 1)));
+}
+
+function isOperationTrace(value: unknown, operation: Blueprint['operations'][number] | undefined): value is OperationTrace {
+  if (!isRecord(value) || !operation || value.operationId !== operation.id || value.family !== operation.family) return false;
+  const machine = value.machine;
+  return BUILDING_KINDS.includes(value.machineKind as BuildingKind)
+    && OPERATION_MACHINES[operation.family].includes(value.machineKind as BuildingKind)
+    && isRecord(machine)
+    && isIntegerInRange(machine.x, 0, GRID_WIDTH - 1)
+    && isIntegerInRange(machine.y, 0, GRID_HEIGHT - 1)
+    && Number.isInteger(value.startedTick) && (value.startedTick as number) >= 0
+    && Number.isInteger(value.completedTick) && (value.completedTick as number) >= (value.startedTick as number)
+    && isIntegerInRange(value.attempted, 0, 100)
+    && isIntegerInRange(value.accepted, 0, value.attempted as number)
+    && isIntegerInRange(value.rejected, 0, value.attempted as number)
+    && (value.accepted as number) + (value.rejected as number) === value.attempted
+    && isFiniteNonNegative(value.averageGrade) && (value.averageGrade as number) <= 100;
 }
 
 function isInventory(value: unknown): value is Record<string, number> {
   return isRecord(value) && Object.values(value).every(isFiniteNonNegative);
 }
 
-function isGameState(value: unknown): value is GameState & { version: 8 } {
-  if (!isRecord(value) || value.version !== 8 || value.schemaVersion !== 8) return false;
+function isGameState(value: unknown): value is GameState & { version: 9 } {
+  if (!isRecord(value) || value.version !== 9 || value.schemaVersion !== 9) return false;
   if (!Number.isInteger(value.tick) || (value.tick as number) < 0) return false;
   if (!isFiniteNonNegative(value.credits) || !isFiniteNonNegative(value.power) || !isFiniteNonNegative(value.reputation)) return false;
   if (!isFiniteNonNegative(value.tutorial) || !isFiniteNonNegative(value.quality) || (value.quality as number) > 100) return false;

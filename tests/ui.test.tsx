@@ -59,6 +59,38 @@ describe('responsive factory controls', () => {
     ]);
   });
 
+  it('shows completed operation traceability with exact yield and grade', async () => {
+    const sim = await import('../src/sim');
+    const state = sim.newGame();
+    state.credits = 5000;
+    state.inventory.steel = 5;
+    state.stockQuality.steel = { quantity: 5, average: 82 };
+    expect(sim.place(state, 0, 0, 'lathe')).toBe(true);
+    state.grid[0][0].condition = 80;
+    state.research.push('quality', 'metrology');
+    expect(sim.place(state, 1, 0, 'cmm')).toBe(true);
+    sim.createWorkOrder(state, 'BP-SHAFT-01', 5);
+    sim.assignWorkOrder(state, 'WO-0001', 0, 0);
+    sim.tick(state, 5);
+    sim.assignWorkOrder(state, 'WO-0001', 1, 0);
+    sim.tick(state, 4);
+    localStorage.setItem('engineer-save', sim.save(state));
+
+    await act(async () => root.unmount());
+    await act(async () => {
+      root = createRoot(host);
+      root.render(<App />);
+    });
+    const contracts = [...host.querySelectorAll('button')].find((node) => node.textContent?.includes('CONTRACTS'))!;
+    await act(async () => contracts.click());
+    const trace = host.querySelector('.traceability-log');
+    const order = host.querySelector('.work-order-queue article');
+    expect(order?.textContent).toContain('output grade 76.8%');
+    expect(order?.textContent).not.toContain('select a compatible machine');
+    expect(trace?.textContent).toContain('TURN · LATHE 1:1 · 5 attempted · 4 accepted · 1 rejected · grade 76.8%');
+    expect(trace?.textContent).toContain('INSPECT · CMM 2:1 · 4 attempted · 4 accepted · 0 rejected · grade 76.8%');
+  });
+
   it('purchases material and queues a visible exact-batch blueprint job', async () => {
     const store = [...host.querySelectorAll('button')].find((node) => node.textContent?.includes('STORE'))!;
     await act(async () => store.click());

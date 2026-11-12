@@ -148,12 +148,12 @@ describe('Engineer.io simulation', () => {
     expect(migrated.grid[4][5]).toEqual({ rot: 0 });
     expect(migrated.grid[2][6]).toEqual({ kind: 'furnace', rot: 3 });
     expect(migrated.credits).toBe(1080);
-    expect(JSON.parse(save(migrated)).version).toBe(8);
+    expect(JSON.parse(save(migrated)).version).toBe(9);
   });
   it('migrates valid v2 18x12 saves into the enlarged map without overwriting old state', () => {
     const legacy = JSON.parse(save(newGame())); legacy.version = 2; legacy.grid = legacy.grid.slice(0, 12).map((row: unknown[]) => row.slice(0, 18)); legacy.grid[0][0] = { kind: 'furnace', rot: 2 }; legacy.inventory.coal = 37;
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.grid).toHaveLength(18); expect(migrated.grid[0]).toHaveLength(30); expect(migrated.grid[0][0]).toMatchObject({ kind: 'furnace', rot: 2 }); expect(migrated.inventory.coal).toBe(37); expect(JSON.parse(save(migrated)).version).toBe(8);
+    expect(migrated.grid).toHaveLength(18); expect(migrated.grid[0]).toHaveLength(30); expect(migrated.grid[0][0]).toMatchObject({ kind: 'furnace', rot: 2 }); expect(migrated.inventory.coal).toBe(37); expect(JSON.parse(save(migrated)).version).toBe(9);
   });
   it('rejects malformed current v3 dimensions', () => { const current = JSON.parse(save(newGame())); current.grid = current.grid.slice(0, 17); expect(() => load(JSON.stringify(current))).toThrow(); });
   it('rotates a bounded deterministic set of customer contracts', () => {
@@ -218,7 +218,7 @@ describe('Engineer.io simulation', () => {
     }
     legacy.contracts[0].done = true;
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.schemaVersion).toBe(8);
+    expect(migrated.schemaVersion).toBe(9);
     expect(migrated.commerce).toEqual({ unitsBought: 0, unitsSold: 0, directRevenue: 0, directSpend: 0 });
     expect(migrated.contracts.find((contract) => contract.id === 'C-101')!.done).toBe(true);
     expect(migrated.contracts.filter((contract) => contract.sequence !== undefined).map((contract) => contract.id)).toEqual(['R-0000', 'R-0001', 'R-0002']);
@@ -253,6 +253,7 @@ describe('Engineer.io simulation', () => {
       id: 'WO-0001', blueprintId: 'BP-SHAFT-01', blueprintRevision: 'A', customer: BLUEPRINTS[0].customer,
       quantity: 5, status: 'queued', operationIndex: 0, reservedItem: 'steel', reservedQuantity: 5,
       reservedGrade: 82, createdTick: 0, completedQuantity: 0, acceptedQuantity: 0, rejectedQuantity: 0,
+      operationAcceptedQuantity: 0, operationRejectedQuantity: 0, operationQualityTotal: 0, traces: [],
     }]);
     expect(s.nextWorkOrder).toBe(2);
   });
@@ -264,10 +265,10 @@ describe('Engineer.io simulation', () => {
     delete legacy.nextWorkOrder;
 
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.schemaVersion).toBe(8);
+    expect(migrated.schemaVersion).toBe(9);
     expect(migrated.workOrders).toEqual([]);
     expect(migrated.nextWorkOrder).toBe(1);
-    expect(JSON.parse(save(migrated)).version).toBe(8);
+    expect(JSON.parse(save(migrated)).version).toBe(9);
   });
   it('cancels a queued work order and restores its exact reserved quantity and grade', () => {
     const s = newGame();
@@ -305,18 +306,83 @@ describe('Engineer.io simulation', () => {
     tick(s, 5);
     expect(s.workOrders[0]).toMatchObject({ status: 'completed', operationIndex: 2, completedQuantity: 5, acceptedQuantity: 5, rejectedQuantity: 0 });
     expect(s.inventory.shaft).toBe(5);
-    expect(s.stockQuality.shaft).toEqual({ quantity: 5, average: 82 });
+    expect(s.stockQuality.shaft).toEqual({ quantity: 5, average: 82.6 });
     expect(s.grid[0][0].cycle).toBe(5);
     expect(s.grid[0][1].cycle).toBe(5);
+  });
+  it('records deterministic operation rejects and preserves accepted batch grade through inspection', () => {
+    const s = newGame();
+    s.inventory.steel = 5;
+    s.stockQuality.steel = { quantity: 5, average: 82 };
+    expect(place(s, 0, 0, 'lathe')).toBe(true);
+    s.grid[0][0].condition = 80;
+    s.research.push('quality', 'metrology');
+    expect(place(s, 1, 0, 'cmm')).toBe(true);
+    expect(createWorkOrder(s, 'BP-SHAFT-01', 5)).toEqual({ ok: true, workOrderId: 'WO-0001' });
+    expect(assignWorkOrder(s, 'WO-0001', 0, 0)).toEqual({ ok: true });
+
+    tick(s, 5);
+    expect(s.workOrders[0]).toMatchObject({
+      status: 'queued', operationIndex: 1, acceptedQuantity: 4, rejectedQuantity: 1,
+      traces: [{ operationId: 'turn', family: 'turning', machineKind: 'lathe', machine: { x: 0, y: 0 }, startedTick: 0, completedTick: 5, attempted: 5, accepted: 4, rejected: 1, averageGrade: 76.75 }],
+    });
+    expect(s.grid[0][0].condition).toBe(75);
+    expect(s.inventory.shaft || 0).toBe(0);
+
+    expect(assignWorkOrder(s, 'WO-0001', 1, 0)).toEqual({ ok: true });
+    tick(s, 4);
+    expect(s.workOrders[0]).toMatchObject({
+      status: 'completed', operationIndex: 2, completedQuantity: 4, acceptedQuantity: 4, rejectedQuantity: 1,
+      traces: [
+        { operationId: 'turn', attempted: 5, accepted: 4, rejected: 1, averageGrade: 76.75 },
+        { operationId: 'inspect', family: 'inspection', machineKind: 'cmm', machine: { x: 1, y: 0 }, startedTick: 5, completedTick: 9, attempted: 4, accepted: 4, rejected: 0, averageGrade: 76.75 },
+      ],
+    });
+    expect(s.inventory.shaft).toBe(4);
+    expect(s.stockQuality.shaft).toEqual({ quantity: 4, average: 76.75 });
+  });
+  it('requeues an interrupted operation without leaving invalid active trace state', () => {
+    const s = newGame();
+    s.inventory.steel = 1;
+    s.stockQuality.steel = { quantity: 1, average: 82 };
+    expect(place(s, 0, 0, 'lathe')).toBe(true);
+    createWorkOrder(s, 'BP-SHAFT-01', 1);
+    assignWorkOrder(s, 'WO-0001', 0, 0);
+    expect(demolish(s, 0, 0)).toBe(true);
+
+    tick(s);
+    expect(s.workOrders[0]).toMatchObject({ status: 'queued', completedQuantity: 0, operationAcceptedQuantity: 0, operationRejectedQuantity: 0, operationQualityTotal: 0 });
+    expect(s.workOrders[0].machine).toBeUndefined();
+    expect(s.workOrders[0].operationStartedTick).toBeUndefined();
+    expect(load(save(s)).workOrders[0].status).toBe('queued');
+  });
+  it('migrates a genuine schema-v8 in-flight order to a safely restartable traced operation', () => {
+    const legacy = JSON.parse(save(newGame()));
+    legacy.version = 8; legacy.schemaVersion = 8;
+    legacy.inventory.steel = 2;
+    legacy.stockQuality.steel = { quantity: 2, average: 82 };
+    legacy.grid[0][0] = { kind: 'lathe', rot: 0, condition: 98, cycle: 2 };
+    legacy.workOrders = [{ id:'WO-0001', blueprintId:'BP-SHAFT-01', blueprintRevision:'A', customer:BLUEPRINTS[0].customer, quantity:2, status:'running', operationIndex:0, reservedItem:'steel', reservedQuantity:2, reservedGrade:82, createdTick:0, machine:{x:0,y:0}, completedQuantity:2, acceptedQuantity:2, rejectedQuantity:0 }];
+    legacy.nextWorkOrder = 2;
+
+    const migrated = load(JSON.stringify(legacy));
+    expect(migrated.schemaVersion).toBe(9);
+    expect(migrated.workOrders[0]).toEqual({
+      id:'WO-0001', blueprintId:'BP-SHAFT-01', blueprintRevision:'A', customer:BLUEPRINTS[0].customer,
+      quantity:2, status:'queued', operationIndex:0, reservedItem:'steel', reservedQuantity:2, reservedGrade:82,
+      createdTick:0, completedQuantity:0, acceptedQuantity:0, rejectedQuantity:0,
+      operationAcceptedQuantity:0, operationRejectedQuantity:0, operationQualityTotal:0, traces:[],
+    });
+    expect(JSON.parse(save(migrated)).version).toBe(9);
   });
   it('migrates schema-v7 queued work orders into unassigned route execution', () => {
     const legacy = JSON.parse(save(newGame()));
     legacy.version = 7; legacy.schemaVersion = 7;
     legacy.workOrders = [{ id:'WO-0001', blueprintId:'BP-SHAFT-01', blueprintRevision:'A', customer:BLUEPRINTS[0].customer, quantity:1, status:'queued', operationIndex:0, reservedItem:'steel', reservedQuantity:1, reservedGrade:82, createdTick:0 }];
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.schemaVersion).toBe(8);
+    expect(migrated.schemaVersion).toBe(9);
     expect(migrated.workOrders[0]).toMatchObject({ status:'queued', completedQuantity:0, acceptedQuantity:0, rejectedQuantity:0 });
-    expect(JSON.parse(save(migrated)).version).toBe(8);
+    expect(JSON.parse(save(migrated)).version).toBe(9);
   });
 });
 
@@ -343,6 +409,6 @@ describe('shop-floor quality milestone', () => {
     const { newGame, save, load } = await import('../src/sim');
     const legacy = JSON.parse(save(newGame())); legacy.version = 4;
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.schemaVersion).toBe(8); expect(migrated.stats.attempted).toBe(0);
+    expect(migrated.schemaVersion).toBe(9); expect(migrated.stats.attempted).toBe(0);
   });
 });
