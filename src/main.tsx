@@ -8,6 +8,7 @@ import {
   beltDirection,
   type BuildingKind,
   type GameState,
+  type Item,
   campaignProgress,
   demolish,
   fulfillContract,
@@ -16,8 +17,11 @@ import {
   place,
   rotate,
   save,
+  serviceMachine,
   tick,
   unlockResearch,
+  capability,
+  meetsContract,
 } from './sim';
 import './style.css';
 
@@ -30,7 +34,7 @@ const names: Record<string, string> = {
   copper: 'COPPER',
   shaft: 'SHAFT',
   gear: 'GEAR',
-  precisionAssembly: 'PRECISION ASSY',
+  precisionAssembly: 'PRECISION ASSY', machinedPlate: 'MACHINED PLATE', bracket: 'BRACKET', precisionHousing: 'PRECISION HOUSING',
 };
 
 const deposits: Record<string, { short: string; color: string }> = {
@@ -40,7 +44,9 @@ const deposits: Record<string, { short: string; color: string }> = {
   stone: { short: 'ST', color: '#b8aa8e' },
 };
 
-type Tab = 'factory' | 'research' | 'orders' | 'help';
+const itemIcons: Record<string,string> = { ironOre:'⛏', copperOre:'◉', coal:'◆', stone:'⬟', steel:'▣', copper:'◎', shaft:'│', gear:'⚙', precisionAssembly:'✦', machinedPlate:'▤', bracket:'⌜', precisionHousing:'⬢' };
+const buildingUI: Record<BuildingKind,{icon:string;group:string;desc:string;recipe?:string}> = { drill:{icon:'⛏',group:'RESOURCES',desc:'Extract deposits'}, furnace:{icon:'♨',group:'RESOURCES',desc:'Refine ore',recipe:'ORE + COAL → STEEL'}, lathe:{icon:'◉',group:'MANUAL MACHINING',desc:'Turn shafts',recipe:'STEEL → SHAFT'}, mill:{icon:'▤',group:'MANUAL MACHINING',desc:'Cut plates',recipe:'STEEL → PLATE'}, cncLathe:{icon:'◉',group:'CNC / AUTOMATION',desc:'Automated turning',recipe:'STEEL → SHAFT'}, cncMill:{icon:'▦',group:'CNC / AUTOMATION',desc:'Precision milling',recipe:'STEEL → HOUSING'}, conveyor:{icon:'➜',group:'LOGISTICS',desc:'Move cargo'}, storage:{icon:'▥',group:'LOGISTICS',desc:'Stock finished goods'}, assembler:{icon:'⚙',group:'CNC / AUTOMATION',desc:'Combine components'}, cmm:{icon:'⌁',group:'QUALITY',desc:'Scan variation'}, shipping:{icon:'⇥',group:'LOGISTICS',desc:'Dispatch contracts'} };
+type Tab = 'factory' | 'research' | 'orders' | 'spc' | 'help';
 
 function App() {
   const [state, setState] = useState<GameState>(() => {
@@ -54,6 +60,7 @@ function App() {
   const [notice, setNotice] = useState('Select a machine, then click the factory floor.');
   const [zoom, setZoom] = useState(1);
   const [animationPhase, setAnimationPhase] = useState(0);
+  const [inspected, setInspected] = useState<{ x: number; y: number } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const campaign = campaignProgress(state);
 
@@ -120,13 +127,26 @@ function App() {
           context.save();
           context.translate(px + cell / 2, py + cell / 2);
           const pulse = tile.kind === 'furnace' ? 1 + Math.sin(animationPhase) * 0.08 : 1;
-          context.rotate(tile.kind === 'lathe' ? animationPhase : tile.kind === 'drill' ? animationPhase * 0.7 : 0);
+          context.rotate(tile.kind === 'drill' ? animationPhase * 0.7 : 0);
           context.scale(pulse, pulse);
           context.fillStyle = BUILDINGS[tile.kind].color;
-          context.fillRect(-cell / 2 + 7, -cell / 2 + 7, Math.max(8, cell - 14), Math.max(8, cell - 14));
+          if (tile.kind === 'drill') { context.fillRect(-8,-14,16,25); context.fillRect(-18,-18,36,8); context.fillStyle='#18232a'; context.fillRect(-3,8,6,12); }
+          else if (tile.kind === 'furnace') { context.fillRect(-16,-12,32,25); context.fillStyle='#ff9b4a'; context.fillRect(-9,-5,18,12); context.fillStyle='#26343c'; context.fillRect(8,-24,8,14); }
+          else if (tile.kind === 'lathe') { context.fillRect(-20,8,40,7); context.fillRect(-15,-7,8,16); context.beginPath(); context.arc(10,0,10,0,Math.PI*2); context.fill(); context.strokeStyle='#dce9ee'; context.lineWidth=2; context.beginPath(); context.moveTo(10,0); context.lineTo(10+Math.cos(animationPhase)*9,Math.sin(animationPhase)*9); context.stroke(); }
+          else if (tile.kind === 'mill') { const travel=Math.sin(animationPhase)*6; context.fillRect(-19,9,38,7); context.fillRect(-15,-14,8,23); context.fillRect(-9,-14,23,6); context.fillStyle='#d8e2e7'; context.fillRect(6,-8,5,15); context.fillStyle='#18232a'; context.fillRect(-9+travel,3,24,5); }
+          else if (tile.kind === 'cncLathe') { context.fillRect(-20,-17,40,34); context.fillStyle='#17242b'; context.fillRect(-14,-11,20,16); context.strokeStyle='#70d4ff'; context.strokeRect(-14,-11,20,16); context.fillStyle='#d8e2e7'; context.beginPath(); context.arc(-4,-3,6,0,Math.PI*2); context.fill(); context.strokeStyle='#17242b'; context.beginPath(); context.moveTo(-4,-3); context.lineTo(-4+Math.cos(animationPhase)*6,-3+Math.sin(animationPhase)*6); context.stroke(); context.fillStyle='#67d6ae'; context.fillRect(11,-12,4,4); }
+          else if (tile.kind === 'cncMill') { const plunge=Math.sin(animationPhase)*3; context.fillRect(-20,-18,40,36); context.fillStyle='#17242b'; context.fillRect(-13,-12,21,21); context.strokeStyle='#70d4ff'; context.strokeRect(-13,-12,21,21); context.fillStyle='#d8e2e7'; context.fillRect(-4,-11,5,12+plunge); context.fillStyle='#79909e'; context.fillRect(-10,5,17,4); context.fillStyle='#67d6ae'; context.fillRect(12,-13,4,4); }
+          else if (tile.kind === 'storage') { context.strokeStyle='#16242c'; context.lineWidth=3; context.strokeRect(-18,-18,36,36); context.fillRect(-14,-9,9,8); context.fillRect(5,-9,9,8); context.fillRect(-14,5,9,8); context.fillRect(5,5,9,8); }
+          else if (tile.kind === 'assembler') { const reach=Math.sin(animationPhase)*5; context.fillRect(-18,10,36,6); context.fillRect(-14,-14,7,24); context.fillRect(7,-14,7,24); context.strokeStyle='#d8e2e7'; context.lineWidth=4; context.beginPath(); context.moveTo(-10,-9); context.lineTo(-3+reach,-1); context.lineTo(0,7); context.moveTo(10,-9); context.lineTo(3-reach,-1); context.lineTo(0,7); context.stroke(); }
+          else if (tile.kind === 'cmm') { const scan=Math.sin(animationPhase)*9; context.fillRect(-18,10,36,6); context.fillRect(-15,-16,6,26); context.fillRect(9,-16,6,26); context.fillRect(-15,-18,30,6); context.fillStyle='#d8e2e7'; context.fillRect(scan-2,-12,4,18); context.fillStyle='#e47b61'; context.beginPath(); context.arc(scan,7,2,0,Math.PI*2); context.fill(); }
+          else if (tile.kind === 'shipping') { const door=(Math.sin(animationPhase)+1)*5; context.fillRect(-19,-17,38,34); context.fillStyle='#17242b'; context.fillRect(-15,-13+door,30,22-door); context.fillStyle='#70828c'; for(let roller=-14; roller<=14; roller+=7) context.fillRect(roller,-16,3,32); }
+          else context.fillRect(-cell / 2 + 7, -cell / 2 + 7, Math.max(8, cell - 14), Math.max(8, cell - 14));
           context.fillStyle = '#101820'; context.font = 'bold 9px IBM Plex Mono, monospace'; context.textAlign = 'center';
           context.fillText(tile.kind.slice(0, 4).toUpperCase(), 0, 3);
           context.restore();
+          const condition = tile.condition ?? 100;
+          context.fillStyle='#17242b'; context.fillRect(px+5,py+cell-6,cell-10,3);
+          context.fillStyle=condition>65?'#67d6ae':condition>30?'#f1c566':'#e47b61'; context.fillRect(px+5,py+cell-6,(cell-10)*condition/100,3);
           const direction = beltDirection(tile.rot);
           const [dx, dy] = direction === 'east' ? [1, 0] : direction === 'south' ? [0, 1] : direction === 'west' ? [-1, 0] : [0, -1];
           context.fillStyle = '#f1c566';
@@ -165,7 +185,9 @@ function App() {
             context.fillRect(cargoX - cell * .18, cargoY - cell * .18, cell * .36, cell * .36);
             context.strokeStyle = '#f5fbff'; context.strokeRect(cargoX - cell * .18, cargoY - cell * .18, cell * .36, cell * .36);
             context.fillStyle = '#101820'; context.font = 'bold 7px IBM Plex Mono'; context.textAlign = 'center';
-            context.fillText(tile.cargo.item.slice(0, 3).toUpperCase(), cargoX, cargoY + 2);
+            context.fillText(tile.cargo.item.slice(0, 3).toUpperCase(), cargoX, cargoY - 1);
+            context.font = 'bold 6px IBM Plex Mono';
+            context.fillText(`Q${Math.round(tile.cargo.quality)}`, cargoX, cargoY + 7);
           }
         }
       }
@@ -220,8 +242,9 @@ function App() {
         setNotice('Select a machine to rotate it, or choose a building tool.');
         return current;
       }
-      rotate(next, x, y);
-      setNotice(`${BUILDINGS[target.kind].label} rotated${target.kind === 'conveyor' ? ` to ${beltDirection(next.grid[y][x].rot)}` : ''}.`);
+      setInspected({ x, y });
+      next.selected = target.kind;
+      setNotice(`${BUILDINGS[target.kind].label} selected at ${x + 1}, ${y + 1}. Use the inspector controls.`);
       return next;
     });
   }
@@ -256,6 +279,7 @@ function App() {
           <button className={tab === 'factory' ? 'active' : ''} onClick={() => setTab('factory')}>▦ FACTORY FLOOR</button>
           <button className={tab === 'research' ? 'active' : ''} onClick={() => setTab('research')}>◇ RESEARCH</button>
           <button className={tab === 'orders' ? 'active' : ''} onClick={() => setTab('orders')}>▤ CONTRACTS</button>
+          <button className={tab === 'spc' ? 'active' : ''} onClick={() => setTab('spc')}>◈ SPC / QUALITY</button>
           <button className={tab === 'help' ? 'active' : ''} onClick={() => setTab('help')}>? FIELD GUIDE</button>
           <div className="side-bottom">
             <button onClick={() => setState((x) => ({ ...x, paused: !x.paused }))}>{state.paused ? '▶ RESUME' : 'Ⅱ PAUSE'}</button>
@@ -265,8 +289,8 @@ function App() {
         </aside>
         <main>
           <div className="topline">
-            <div><span className="eyebrow">CAMPAIGN / GARAGE WORKSHOP</span><h1>{tab === 'factory' ? 'Production floor' : tab === 'research' ? 'Capability roadmap' : tab === 'orders' ? 'Active contracts' : 'Operator field guide'}</h1></div>
-            <div className="kpis"><span>POWER <b className={state.power < 10 ? 'warn' : ''}>{state.power} kW</b></span><span>REPUTATION <b>{state.reputation}</b></span><span>QUALITY <b className="good">{state.quality}%</b></span></div>
+            <div><span className="eyebrow">CAMPAIGN / GARAGE WORKSHOP</span><h1>{tab === 'factory' ? 'Production floor' : tab === 'research' ? 'Capability roadmap' : tab === 'orders' ? 'Active contracts' : tab === 'spc' ? 'SPC / quality control' : 'Operator field guide'}</h1></div>
+            <div className="kpis">{[['⚡','POWER',`${state.power} kW`,state.power<10?'warn':'good'],['◈','CAPABILITY',`${state.quality}%`,state.quality<70?'warn':'good'],['✓','YIELD',`${state.stats.attempted ? Math.round(state.stats.accepted/state.stats.attempted*100) : 100}%`,'good'],['▥','SCRAP',String(state.stats.scrap),state.stats.scrap?'warn':'good'],['★','REPUTATION',String(state.reputation),'good']].map(([icon,label,value,tone])=><div className={`kpi-card ${tone}`} key={label}><span className="kpi-icon">{icon}</span><span><small>{label}</small><b>{value}</b></span><i className="pulse" /></div>)}</div>
           </div>
 
           <section className={`objective-card ${campaign.objective.complete ? 'complete' : ''}`} aria-label="Current campaign objective">
@@ -281,17 +305,27 @@ function App() {
               <div className="toolbar">
                 <button aria-pressed={state.mode === 'select'} className={state.mode === 'select' ? 'chosen' : ''} onClick={() => setState((x) => ({ ...x, mode: 'select' }))}>SELECT / ROTATE</button>
                 <button aria-pressed={state.mode === 'demolish'} className={state.mode === 'demolish' ? 'chosen danger' : ''} onClick={() => setState((x) => ({ ...x, mode: 'demolish' }))}>DEMOLISH</button>
-                {(Object.keys(BUILDINGS) as BuildingKind[]).map((kind) => { const locked = !state.research.includes(BUILDINGS[kind].requiredResearch); return <button key={kind} disabled={locked} aria-pressed={state.mode === 'place' && state.selected === kind} className={state.mode === 'place' && state.selected === kind ? 'chosen' : ''} onClick={() => { setState((x) => ({ ...x, mode: 'place', selected: kind })); setNotice(`${BUILDINGS[kind].label} selected${kind === 'conveyor' ? ', facing east' : ''}. Choose a free cell${kind === 'drill' ? ' on a deposit' : ''}.`); }}>{BUILDINGS[kind].label}<small>{locked ? `REQUIRES ${BUILDINGS[kind].requiredResearch}` : `₡${BUILDINGS[kind].cost}`}</small></button>; })}
+                <div className="catalogue">{(['RESOURCES','MANUAL MACHINING','CNC / AUTOMATION','QUALITY','LOGISTICS'] as const).map(group => <section className="catalogue-group" key={group}><h3>{group}</h3><div className="machine-grid">{(Object.keys(BUILDINGS) as BuildingKind[]).filter(kind => buildingUI[kind].group === group).map(kind => { const b=BUILDINGS[kind], ui=buildingUI[kind], locked=!state.research.includes(b.requiredResearch); return <button className={`machine-card ${state.mode==='place'&&state.selected===kind?'chosen':''}`} key={kind} disabled={locked} onClick={() => { setState(x=>({...x,mode:'place',selected:kind})); setNotice(`${b.label} selected. Choose a free cell.`); }}><span className="icon-tile">{ui.icon}</span><span className="machine-copy"><b>{b.label}</b><small>{ui.desc}</small>{ui.recipe&&<small className="recipe">{ui.recipe}</small>}<small>₡{b.cost} · {b.power} kW · {locked?`LOCKED: ${b.requiredResearch}`:'ONLINE'}</small></span></button>})}</div></section>)}</div>
                 <label>ZOOM <input aria-label="Factory zoom" type="range" min=".7" max="1.4" step=".1" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
               </div>
               <div className="board"><canvas ref={canvasRef} onClick={handleCanvasClick} aria-label={`Interactive ${GRID_WIDTH} by ${GRID_HEIGHT} factory floor`} /><div className="legend"><span>{state.mode === 'place' ? 'PLACEMENT MODE' : state.mode === 'demolish' ? 'DEMOLITION MODE' : 'SELECT / ROTATE MODE'}</span><span>BELTS: 0 EAST · 1 SOUTH · 2 WEST · 3 NORTH · SELECT/ROTATE</span><span>COAL: high-contrast CO deposit · TICK {state.tick}</span></div></div>
-              <section className="panels"><div><h3>STOCK CONTROL <i>LIVE</i></h3><div className="stock">{Object.entries(state.inventory).map(([key, value]) => <span key={key}><b>{names[key] || key}</b><strong>{value}</strong></span>)}</div></div><div><h3>HOW PRODUCTION WORKS</h3><p>Every active machine reads from the shared stock inventory once per tick. Drills extract their deposit, furnaces consume ore and coal, and lathes turn steel into shafts. Conveyors route real crates into racks and shipping docks; blocked belts wait safely and pause freezes movement.</p></div></section>
+              <section className="panels"><div><h3>STOCK CONTROL <i>LIVE</i></h3><div className="stock">{Object.entries(state.inventory).map(([key, value]) => { const q=state.stockQuality[key as Item]; return <span className="stock-card" key={key}><em>{itemIcons[key]||'◇'}</em><b>{names[key] || key}</b><strong>{value}</strong><small>AVG {q?.average?.toFixed(0) || state.quality}%</small></span>})}</div></div><div><h3>HOW PRODUCTION WORKS</h3><p>Every active machine reads from shared stock. Condition degrades with cycles; CMM scans build samples and Cpk. Manual machining is flexible, while CNC trades research cost for tighter variation.</p></div></section>{inspected && <Inspector state={state} setState={setState} setNotice={setNotice} position={inspected} />}
             </>
-          ) : tab === 'research' ? <Research state={state} setState={setState} setNotice={setNotice} /> : tab === 'orders' ? <Orders state={state} setState={setState} setNotice={setNotice} /> : <Guide />}
+          ) : tab === 'research' ? <Research state={state} setState={setState} setNotice={setNotice} /> : tab === 'orders' ? <Orders state={state} setState={setState} setNotice={setNotice} /> : tab === 'spc' ? <Quality state={state} /> : <Guide />}
         </main>
       </div>
     </div>
   );
+}
+
+function Inspector({ state, setState, setNotice, position }: { state: GameState; setState: React.Dispatch<React.SetStateAction<GameState>>; setNotice: React.Dispatch<React.SetStateAction<string>>; position: {x:number;y:number} }) {
+  const tile = state.grid[position.y][position.x]; if (!tile.kind) return null;
+  const machine = BUILDINGS[tile.kind];
+  const ui = buildingUI[tile.kind];
+  const condition = tile.condition ?? 100;
+  const manual = tile.kind === 'lathe' || tile.kind === 'mill';
+  const risk = Math.min(80, Math.max(2, Math.round((100 - condition) * .45 + (manual && !state.research.includes('quality') ? 24 : manual ? 10 : 4))));
+  return <div className="inspector"><div className="inspector-title"><span className="icon-tile">{ui.icon}</span><div><span className="eyebrow">SHOP / MACHINE INSPECTOR · LIVE</span><h2>{machine.label}</h2><small>GRID {position.x + 1}:{position.y + 1} · OUTPUT {beltDirection(tile.rot).toUpperCase()}</small></div></div><div className="inspector-grid"><span><small>CONDITION</small><b>{condition}%</b><i className="condition-track"><i style={{width:`${condition}%`}} /></i></span><span><small>PRODUCTIVE CYCLES</small><b>{tile.cycle ?? 0}</b></span><span><small>POWER DRAW</small><b>{machine.power} kW</b></span><span><small>SHOP YIELD</small><b>{state.stats.attempted ? Math.round(state.stats.accepted/state.stats.attempted*100) : 100}%</b></span><span><small>PROJECTED REJECTION</small><b>{risk}%</b></span><span><small>PROCESS</small><b>{ui.recipe || ui.desc}</b></span></div>{manual && !state.research.includes('quality') && <p className="upgrade-note">◇ Research Quality Control to reduce manual process variation; SPC and metrology later prove whether output is capable.</p>}<div className="inspector-actions"><button onClick={() => setState((current) => { const next = structuredClone(current); rotate(next, position.x, position.y); setNotice(`${machine.label} rotated to ${beltDirection(next.grid[position.y][position.x].rot)}.`); return next; })}>↻ ROTATE</button><button disabled={condition >= 100} onClick={() => setState((current) => { const next = structuredClone(current); const result = serviceMachine(next, position.x, position.y); setNotice(result.ok ? `${machine.label} serviced for ₡${result.cost}.` : `Service rejected: ${result.reason}.`); return result.ok ? next : current; })}>⌁ SERVICE ₡40</button></div></div>;
 }
 
 function Research({ state, setState, setNotice }: { state: GameState; setState: React.Dispatch<React.SetStateAction<GameState>>; setNotice: React.Dispatch<React.SetStateAction<string>> }) {
@@ -307,7 +341,14 @@ function Research({ state, setState, setNotice }: { state: GameState; setState: 
       return result.state;
     });
   }
-  return <div className="research">{Object.values(RESEARCH).map((node, index) => { const unlocked = state.research.includes(node.id); const ready = node.prerequisites.every((p) => state.research.includes(p)); return <article className={unlocked ? 'unlocked' : ready ? 'available' : 'locked'} key={node.id}><div className="node">{index + 1}</div><div><h2>{node.label} {unlocked && <em>UNLOCKED</em>}</h2><p>{node.description}</p><p><b>Prerequisites:</b> {node.prerequisites.join(', ') || 'none'} · <b>Effects:</b> {node.effects.join(' ')}</p></div><button disabled={unlocked || !ready} onClick={() => purchase(node.id, node.label)}>{unlocked ? 'ACTIVE' : !ready ? 'LOCKED' : `₡${node.cost} RESEARCH`}</button></article>; })}</div>;
+  const groups = [
+    ['FOUNDATION', '◆', ['workshop','smelting','copper']],
+    ['MACHINING', '⚙', ['machining','gearing','milling']],
+    ['QUALITY & SPC', '◈', ['quality','spcFundamentals','metrology','processCapability']],
+    ['AUTOMATION', '⌁', ['belts','assembly','automation','logistics','cncMachining']],
+    ['REGULATED', '✦', ['advancedMaterials','aerospaceCertification','medicalCertification']],
+  ] as const;
+  return <div className="research">{groups.map(([label, icon, ids]) => <section className="research-group" key={label}><h3>{icon} {label}</h3>{ids.map((id, index) => { const node=RESEARCH[id]; const unlocked = state.research.includes(node.id); const ready = node.prerequisites.every((p) => state.research.includes(p)); return <article className={unlocked ? 'unlocked' : ready ? 'available' : 'locked'} key={node.id}><div className="node">{index + 1}</div><div><h2>{node.label} {unlocked && <em>UNLOCKED</em>}</h2><p>{node.description}</p><div className="research-chips"><span>PREREQ: {node.prerequisites.join(', ') || 'none'}</span>{node.effects.map(effect=><span key={effect}>{effect}</span>)}</div></div><button disabled={unlocked || !ready} onClick={() => purchase(node.id, node.label)}>{unlocked ? 'ACTIVE' : !ready ? 'LOCKED' : `₡${node.cost} RESEARCH`}</button></article>; })}</section>)}</div>;
 }
 
 function Orders({ state, setState, setNotice }: { state: GameState; setState: React.Dispatch<React.SetStateAction<GameState>>; setNotice: React.Dispatch<React.SetStateAction<string>> }) {
@@ -317,7 +358,7 @@ function Orders({ state, setState, setNotice }: { state: GameState; setState: Re
       const next = structuredClone(current);
       const result = fulfillContract(next, id);
       if (!result.ok) {
-        const messages = { missing: 'Contract not found.', done: 'That contract is already fulfilled.', stock: 'Not enough finished stock.', quality: 'Quality is below the contract requirement.', expired: 'The contract deadline has passed.', locked: 'Research or reputation requirements are not yet met.' };
+        const messages = { missing: 'Contract not found.', done: 'That contract is already fulfilled.', stock: 'Not enough finished stock.', quality: 'Quality is below the contract requirement.', expired: 'The contract deadline has passed.', locked: 'Research or reputation requirements are not yet met.', capability: 'Process capability is below the contract requirement.', inspection: 'Required inspection samples are not complete.' };
         setNotice(messages[result.reason]);
         return current;
       }
@@ -331,10 +372,16 @@ function Orders({ state, setState, setNotice }: { state: GameState; setState: Re
     const researchLocked = !!contract.requiredResearch && !state.research.includes(contract.requiredResearch);
     const reputationLocked = contract.minReputation !== undefined && state.reputation < contract.minReputation;
     const locked = researchLocked || reputationLocked;
-    const blocked = locked || expired || stock < contract.qty || state.quality < contract.minGrade;
-    const status = contract.done ? 'FULFILLED' : locked ? 'LOCKED' : expired ? 'EXPIRED' : stock < contract.qty ? 'NEED STOCK' : state.quality < contract.minGrade ? 'NEED QUALITY' : 'READY';
-    return <article className={locked ? 'locked' : contract.done ? 'unlocked' : ''} key={contract.id}><div><span className="eyebrow">{contract.id} / {status}</span><h2>{names[contract.item]} × {contract.qty}</h2><p>Stock {stock}/{contract.qty} · Minimum quality <b>{contract.minGrade}%</b> · Deadline tick {contract.deadline}</p>{locked && <p className="requirements">Requires {contract.requiredResearch || 'current research'}{contract.minReputation !== undefined ? ` · reputation ${contract.minReputation}` : ''}</p>}</div><div className="reward">₡ {contract.reward}<button disabled={contract.done || blocked} onClick={() => ship(contract.id)}>{contract.done ? 'FULFILLED' : status}</button></div></article>;
+    const check = meetsContract(state, contract);
+    const blocked = !check.ok;
+    const status = contract.done ? 'FULFILLED' : expired ? 'EXPIRED' : check.ok ? 'READY TO SHIP' : check.reason === 'stock' ? 'NEED STOCK' : check.reason === 'quality' ? 'NEED GRADE' : check.reason === 'inspection' ? 'NEED SAMPLES' : check.reason === 'capability' ? 'NEED CPK' : check.reason === 'locked' ? 'CERTIFICATION LOCKED' : 'NEED STOCK';
+    return <article className={`sector-${contract.sector || 'regular'} ${locked ? 'locked' : contract.done ? 'unlocked' : ''}`} key={contract.id}><div><span className="sector-badge">{contract.sector === 'aerospace' ? '✈ AEROSPACE' : contract.sector === 'medical' ? '✚ MEDICAL' : '▣ REGULAR'}</span><span className="eyebrow"> {contract.id} / {status}</span><h2>{itemIcons[contract.item]||'◇'} {names[contract.item]} × {contract.qty}</h2><p>Stock <b>{stock}/{contract.qty}</b> · Grade <b>{state.stockQuality[contract.item]?.average?.toFixed(0) || state.quality}% / {contract.minGrade}%</b> · Samples <b>{state.spc[contract.item]?.count || 0}/{contract.minSamples || 0}</b> · Cpk <b>{state.spc[contract.item]?.cpk?.toFixed(2) || '—'} / {contract.minCpk || '—'}</b></p><p>Inspection: {contract.inspectionLevel || 'basic'} · Deadline tick {contract.deadline} · Research: {contract.requiredResearch || 'none'}</p></div><div className="reward">₡ {contract.reward}<button disabled={contract.done || blocked} onClick={() => ship(contract.id)}>{contract.done ? 'FULFILLED' : status}</button></div></article>;
   })}</div>;
+}
+
+function Quality({ state }: { state: GameState }) {
+  const items = Object.keys(state.inventory).filter((item) => (state.inventory[item] || 0) > 0 || state.spc[item as keyof GameState['spc']]);
+  return <div className="quality-screen"><div className="quality-intro"><span className="eyebrow">STATISTICAL PROCESS CONTROL</span><h2>Capability at a glance</h2><p>Cpk compares process spread with specification limits. Five samples unlock a stable capability reading; higher is better.</p></div><div className="quality-grid">{items.map((item) => { const d = capability(state, item as any); const stock = state.stockQuality[item as Item]; const cpk = d.cpk === null ? null : Number.isFinite(d.cpk) ? d.cpk : 0; const status = d.count === 0 ? 'NOT SAMPLED' : d.count < 5 ? `COLLECTING ${d.count}/5` : cpk !== null && cpk >= 1.33 ? 'CAPABLE' : 'MARGINAL'; return <article className="quality-card" key={item}><div><span className="eyebrow">{names[item] || item}</span><h3>{state.inventory[item] || 0} UNITS</h3></div><div className="quality-metrics"><span>AVG GRADE <b>{stock?.average?.toFixed(1) || '—'}</b></span><span>SAMPLES <b>{d.count}</b></span><span>MEAN <b>{d.count ? d.mean.toFixed(1) : '—'}</b></span><span>SIGMA <b>{d.count ? d.standardDeviation.toFixed(2) : '—'}</b></span><span>CPK <b>{cpk === null ? '—' : cpk.toFixed(2)}</b></span></div><div className={`quality-status ${status === 'CAPABLE' ? 'good' : status === 'MARGINAL' ? 'warn' : ''}`}>{status}</div></article>; })}</div><div className="quality-progression"><h3>QUALITY PROGRESSION</h3><p>Improve Cpk with Quality, SPC Fundamentals, Metrology, Process Capability and CNC research. Idle CMM benches do not inflate capability; inspection improves produced measurement confidence.</p><div className="progress-track"><span style={{ width: `${Math.min(100, state.quality)}%` }} /></div></div></div>;
 }
 
 function Guide() {

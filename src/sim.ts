@@ -3,6 +3,9 @@ export type BuildingKind =
   | 'drill'
   | 'furnace'
   | 'lathe'
+  | 'mill'
+  | 'cncLathe'
+  | 'cncMill'
   | 'conveyor'
   | 'storage'
   | 'assembler'
@@ -17,7 +20,10 @@ export type Item =
   | 'copper'
   | 'shaft'
   | 'gear'
-  | 'precisionAssembly';
+  | 'precisionAssembly'
+  | 'machinedPlate'
+  | 'bracket'
+  | 'precisionHousing';
 
 export interface Tile {
   kind?: BuildingKind;
@@ -25,7 +31,12 @@ export interface Tile {
   item?: Item;
   amount?: number;
   cargo?: { item: Item; quality: number; progress: number };
+  condition?: number;
+  cycle?: number;
 }
+export interface StockQuality { quantity: number; average: number }
+export interface SpcData { count: number; mean: number; m2: number; standardDeviation: number; cpk: number | null }
+export interface ProductionStats { attempted: number; accepted: number; rejected: number; scrap: number }
 
 export interface Contract {
   id: string;
@@ -37,6 +48,10 @@ export interface Contract {
   done: boolean;
   requiredResearch?: string;
   minReputation?: number;
+  sector?: 'regular' | 'aerospace' | 'medical';
+  minCpk?: number;
+  minSamples?: number;
+  inspectionLevel?: 'basic' | 'traceable' | 'certified';
 }
 
 export interface GameState {
@@ -54,6 +69,10 @@ export interface GameState {
   mode: Tool;
   tutorial: number;
   quality: number;
+  stockQuality: Partial<Record<Item, StockQuality>>;
+  stats: ProductionStats;
+  spc: Partial<Record<Item, SpcData>>;
+  schemaVersion: 5;
 }
 
 
@@ -68,6 +87,12 @@ export const RESEARCH: Record<string, ResearchNode> = {
   gearing:{id:'gearing',label:'Gear Cutting',cost:360,prerequisites:['machining'],description:'Cut steel into gears.',effects:['Lathes produce gears.']},
   assembly:{id:'assembly',label:'Precision Assembly',cost:480,prerequisites:['gearing'],description:'Combine gears and copper.',effects:['Assemblers produce precision assemblies.'],unlocks:['assembler']},
   quality:{id:'quality',label:'Quality Control',cost:300,prerequisites:['workshop'],description:'Improve process consistency.',effects:['Machining raises quality by 2%.']},
+  spcFundamentals:{id:'spcFundamentals',label:'SPC Fundamentals',cost:420,prerequisites:['quality'],description:'Track accepted output samples.',effects:['Shows samples and enables basic capability reporting.']},
+  processCapability:{id:'processCapability',label:'Advanced Process Capability',cost:700,prerequisites:['spcFundamentals','metrology'],description:'Control variation for regulated work.',effects:['Improves spread and unlocks aerospace certification.']},
+  milling:{id:'milling',label:'Milling',cost:320,prerequisites:['machining'],description:'Machine plates and brackets.',effects:['Unlocks Manual Mill.'],unlocks:['mill']},
+  cncMachining:{id:'cncMachining',label:'CNC Machining',cost:850,prerequisites:['milling','processCapability'],description:'High capability automated machining.',effects:['Unlocks CNC lathe and mill.'],unlocks:['cncLathe','cncMill']},
+  aerospaceCertification:{id:'aerospaceCertification',label:'Aerospace Certification',cost:900,prerequisites:['processCapability'],description:'Certified aerospace production.',effects:['Eligible for aerospace contracts.']},
+  medicalCertification:{id:'medicalCertification',label:'Medical Certification',cost:950,prerequisites:['processCapability','metrology'],description:'Traceable medical production.',effects:['Eligible for medical contracts.']},
   metrology:{id:'metrology',label:'Metrology',cost:520,prerequisites:['quality'],description:'Certified inspection.',effects:['CMM benches and a 100% quality cap.'],unlocks:['cmm']},
   belts:{id:'belts',label:'High-Speed Belts',cost:340,prerequisites:['workshop'],description:'Improved logistics.',effects:['Cargo advances faster on belts.']},
   automation:{id:'automation',label:'Automation',cost:600,prerequisites:['belts','assembly'],description:'Powered production cells.',effects:['Machines gain a second production cycle every other tick.','Advanced production contracts activate.']},
@@ -109,13 +134,13 @@ export function beltDirection(rot: number): BeltDirection { return (['east', 'so
 const LEGACY_GRID_WIDTH = 18;
 const LEGACY_GRID_HEIGHT = 12;
 const TOOLS: Tool[] = ['select', 'place', 'demolish'];
-const BUILDING_KINDS: BuildingKind[] = ['drill', 'furnace', 'lathe', 'conveyor', 'storage', 'assembler', 'cmm', 'shipping'];
-const ITEMS: Item[] = ['ironOre', 'copperOre', 'coal', 'stone', 'steel', 'copper', 'shaft', 'gear', 'precisionAssembly'];
+const BUILDING_KINDS: BuildingKind[] = ['drill', 'furnace', 'lathe', 'mill', 'cncLathe', 'cncMill', 'conveyor', 'storage', 'assembler', 'cmm', 'shipping'];
+const ITEMS: Item[] = ['ironOre', 'copperOre', 'coal', 'stone', 'steel', 'copper', 'shaft', 'gear', 'precisionAssembly', 'machinedPlate', 'bracket', 'precisionHousing'];
 function dispatchEligible(s: GameState): void {
   for (const contract of s.contracts) {
     if (contract.done || s.tick >= contract.deadline) continue;
     if (contract.requiredResearch && !s.research.includes(contract.requiredResearch)) continue;
-    if ((s.inventory[contract.item] || 0) >= contract.qty && s.quality >= contract.minGrade) {
+    if (meetsContract(s, contract).ok) {
       fulfillContract(s, contract.id);
       return;
     }
@@ -139,6 +164,9 @@ export const BUILDINGS: Record<BuildingKind, { label: string; cost: number; powe
   drill: { label: 'Powered Drill', cost: 120, power: 3, color: '#e8ad4b', requiredResearch:'workshop' },
   furnace: { label: 'Arc Furnace', cost: 180, power: 5, color: '#e66a46', requiredResearch:'workshop' },
   lathe: { label: 'Manual Lathe', cost: 80, power: 0, color: '#4db5d9', requiredResearch:'workshop' },
+  mill: { label: 'Manual Mill', cost: 140, power: 1, color: '#4d9fd9', requiredResearch:'milling' },
+  cncLathe: { label: 'CNC Lathe', cost: 520, power: 4, color: '#3478d1', requiredResearch:'cncMachining' },
+  cncMill: { label: 'CNC Mill', cost: 600, power: 5, color: '#285aaa', requiredResearch:'cncMachining' },
   conveyor: { label: 'Belt', cost: 25, power: 1, color: '#8193a6', requiredResearch:'workshop' },
   storage: { label: 'Stock Rack', cost: 60, power: 0, color: '#7d9a71', requiredResearch:'workshop' },
   assembler: { label: 'Assembler', cost: 300, power: 8, color: '#af77d8', requiredResearch:'assembly' },
@@ -147,14 +175,20 @@ export const BUILDINGS: Record<BuildingKind, { label: string; cost: number; powe
 };
 
 const CONTRACT_TEMPLATES: Contract[] = [
-  { id: 'C-101', item: 'steel', qty: 8, minGrade: 65, reward: 480, deadline: 900, done: false },
-  { id: 'C-202', item: 'shaft', qty: 4, minGrade: 78, reward: 720, deadline: 1400, done: false },
+  { id: 'C-101', item: 'steel', qty: 8, minGrade: 65, reward: 480, deadline: 900, done: false, sector:'regular', inspectionLevel:'basic' },
+  { id: 'C-202', item: 'shaft', qty: 4, minGrade: 78, reward: 720, deadline: 1400, done: false, sector:'regular', inspectionLevel:'basic' },
   { id: 'C-303', item: 'copper', qty: 6, minGrade: 70, reward: 520, deadline: 1800, done: false, requiredResearch: 'copper', minReputation: 10 },
   { id: 'C-404', item: 'gear', qty: 3, minGrade: 75, reward: 900, deadline: 2400, done: false, requiredResearch: 'gearing', minReputation: 20 },
   { id: 'C-505', item: 'precisionAssembly', qty: 2, minGrade: 82, reward: 1400, deadline: 3200, done: false, requiredResearch: 'assembly', minReputation: 30 },
   { id: 'C-606', item: 'steel', qty: 16, minGrade: 80, reward: 1100, deadline: 3600, done: false, requiredResearch: 'advancedMaterials', minReputation: 40 },
   { id: 'C-707', item: 'shaft', qty: 8, minGrade: 85, reward: 1500, deadline: 4200, done: false, requiredResearch: 'automation', minReputation: 50 },
   { id: 'C-808', item: 'copper', qty: 12, minGrade: 85, reward: 1200, deadline: 4800, done: false, requiredResearch: 'advancedMaterials', minReputation: 60 },
+  { id: 'A-101', item:'precisionHousing', qty:2, minGrade:90, reward:2600, deadline:5200, done:false, sector:'aerospace', requiredResearch:'aerospaceCertification', minCpk:1.33, minSamples:5, inspectionLevel:'certified' },
+  { id: 'A-202', item:'shaft', qty:6, minGrade:88, reward:2200, deadline:5000, done:false, sector:'aerospace', requiredResearch:'aerospaceCertification', minCpk:1.33, minSamples:5, inspectionLevel:'certified' },
+  { id: 'A-303', item:'machinedPlate', qty:5, minGrade:86, reward:1900, deadline:4700, done:false, sector:'aerospace', requiredResearch:'aerospaceCertification', minCpk:1.2, minSamples:5, inspectionLevel:'traceable' },
+  { id: 'M-101', item:'bracket', qty:4, minGrade:92, reward:3000, deadline:5600, done:false, sector:'medical', requiredResearch:'medicalCertification', minCpk:1.67, minSamples:8, inspectionLevel:'certified' },
+  { id: 'M-202', item:'precisionHousing', qty:3, minGrade:94, reward:3600, deadline:6000, done:false, sector:'medical', requiredResearch:'medicalCertification', minCpk:1.67, minSamples:8, inspectionLevel:'certified' },
+  { id: 'M-303', item:'shaft', qty:8, minGrade:90, reward:2800, deadline:5800, done:false, sector:'medical', requiredResearch:'medicalCertification', minCpk:1.5, minSamples:8, inspectionLevel:'traceable' },
 ];
 
 export function newGame(): GameState {
@@ -175,6 +209,7 @@ export function newGame(): GameState {
     mode: 'select',
     tutorial: 0,
     quality: 72,
+    stockQuality: {}, spc: {}, stats: { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }, schemaVersion: 5,
   };
 }
 
@@ -183,6 +218,7 @@ export function place(s: GameState, x: number, y: number, kind: BuildingKind): b
   const building = BUILDINGS[kind];
   if (!tile || tile.kind || s.credits < building.cost || !s.research.includes(building.requiredResearch) || (kind === 'drill' && !tile.item)) return false;
   tile.kind = kind;
+  tile.condition = 100; tile.cycle = 0;
   s.credits -= building.cost;
   return true;
 }
@@ -197,7 +233,7 @@ export function demolish(s: GameState, x: number, y: number): boolean {
   if (!tile?.kind) return false;
   s.credits += Math.floor(BUILDINGS[tile.kind].cost * 0.5);
   if (tile.cargo) {
-    s.inventory[tile.cargo.item] = (s.inventory[tile.cargo.item] || 0) + 1;
+    addStock(s, tile.cargo.item, tile.cargo.quality);
     delete tile.cargo;
   }
   tile.kind = undefined;
@@ -216,13 +252,51 @@ function adjacentTile(s: GameState, x: number, y: number, rot: number): Tile | u
 
 function outputItem(s: GameState, x: number, y: number, item: Item): void {
   const machine = s.grid[y][x];
+  const quality = producedQuality(s, machine, item, x, y);
+  if (machine.kind && !['conveyor','storage','shipping','cmm'].includes(machine.kind)) {
+    machine.condition = Math.max(0, (machine.condition ?? 100) - 1);
+    machine.cycle = (machine.cycle ?? 0) + 1;
+  }
+  s.stats.attempted++;
+  if (quality < rejectionThreshold(s, machine)) { s.stats.rejected++; s.stats.scrap++; return; }
+  s.stats.accepted++;
+  recordSample(s, item, quality);
   const target = adjacentTile(s, x, y, machine.rot);
   if (target?.kind === 'conveyor' && !target.cargo) {
-    target.cargo = { item, quality: s.quality, progress: 0 };
+    target.cargo = { item, quality, progress: 0 };
   } else {
-    s.inventory[item] = (s.inventory[item] || 0) + 1;
+    addStock(s, item, quality);
   }
 }
+
+function addStock(s: GameState, item: Item, quality: number): void {
+  const old = s.stockQuality[item]; const count = s.inventory[item] || 0;
+  s.inventory[item] = count + 1;
+  s.stockQuality[item] = { quantity: count + 1, average: old ? (old.average * count + quality) / (count + 1) : quality };
+}
+function recordSample(s: GameState, item: Item, quality: number): void {
+  if (!s.research.includes('spcFundamentals')) return;
+  const old = s.spc[item] || { count: 0, mean: 0, m2: 0, standardDeviation: 0, cpk: null };
+  const count = old.count + 1; const delta = quality - old.mean; const mean = old.mean + delta / count; const m2 = old.m2 + delta * (quality - mean);
+  const sd = count > 1 ? Math.sqrt(Math.max(0, m2 / (count - 1))) : 0;
+  s.spc[item] = { count, mean, m2, standardDeviation: sd, cpk: count >= 5 ? Math.max(0, Math.min((100 - mean) / (3 * Math.max(sd, 0.01)), (mean - 0) / (3 * Math.max(sd, 0.01)))) : null };
+}
+export function capability(s: GameState, item: Item): SpcData | { count: number; mean: number; standardDeviation: number; cpk: null; insufficientSamples: true } {
+  const d = s.spc[item];
+  if (!d || d.count < 5) return { count: d?.count ?? 0, mean: d?.mean ?? 0, standardDeviation: d?.standardDeviation ?? 0, cpk: null, insufficientSamples: true };
+  return d;
+}
+function producedQuality(s: GameState, machine: Tile, item: Item, x: number, y: number): number {
+  const cnc = machine.kind === 'cncLathe' || machine.kind === 'cncMill';
+  const base = item === 'steel' || item === 'copper' ? 70 : item === 'gear' ? 74 : machine.kind === 'lathe' ? 69 : cnc ? 90 : 78;
+  const research = s.research.includes('quality') ? 10 : 0;
+  const metrology = s.research.includes('metrology') ? 8 : 0;
+  const measured = s.grid.some(row => row.some(tile => tile.kind === 'cmm'));
+  const spread = s.research.includes('processCapability') ? 1 : cnc ? 2 : 5;
+  const wear = Math.max(0, 100 - (machine.condition ?? 100)) * 0.25;
+  return Math.max(0, Math.min(100, Math.round(base + research + metrology + (measured ? 4 : 0) - wear + ((s.tick + x * 7 + y * 11 + (machine.cycle ?? 0) * 13) % (spread * 2 + 1)) - spread)));
+}
+function rejectionThreshold(s: GameState, machine: Tile): number { return machine.kind === 'lathe' ? (s.research.includes('quality') ? 72 : 68) : machine.kind === 'mill' ? 70 : 50; }
 
 function activeContractFor(s: GameState, items: Item[]): Contract | undefined {
   return s.contracts.find((contract) => !contract.done
@@ -257,7 +331,7 @@ function advanceCargo(s: GameState): void {
     }
     if (target?.kind === 'storage' || target?.kind === 'shipping') {
       const item = source.cargo.item;
-      s.inventory[item] = (s.inventory[item] || 0) + 1;
+      addStock(s, item, source.cargo.quality);
       delete source.cargo;
       if (target.kind === 'shipping') {
         if (s.research.includes('logistics')) s.reputation += 1;
@@ -276,6 +350,7 @@ function processMachines(s: GameState): number {
   for (let y = 0; y < GRID_HEIGHT; y++) for (let x = 0; x < GRID_WIDTH; x++) {
     const tile = s.grid[y][x];
     if (tile.kind) powerUsed += BUILDINGS[tile.kind].power;
+
     if (tile.kind === 'drill' && tile.item && (tile.amount ?? 0) > 0) {
       tile.amount!--;
       outputItem(s, x, y, tile.item);
@@ -295,11 +370,15 @@ function processMachines(s: GameState): number {
       s.inventory.steel--;
       outputItem(s, x, y, item);
       if (s.research.includes('quality')) s.quality = Math.min(s.research.includes('metrology') ? 100 : 98, s.quality + 2);
+    } else if (['cncLathe'].includes(tile.kind || '') && (s.inventory.steel || 0) >= 1) {
+      s.inventory.steel--; outputItem(s, x, y, 'shaft');
+
+    } else if (['mill','cncMill'].includes(tile.kind || '') && (s.inventory.steel || 0) >= 1) {
+      s.inventory.steel--; outputItem(s, x, y, tile.kind === 'cncMill' ? 'precisionHousing' : 'machinedPlate');
+
     } else if (tile.kind === 'assembler' && (s.inventory.gear || 0) >= 1 && (s.inventory.copper || 0) >= 1) {
       s.inventory.gear--; s.inventory.copper--;
       outputItem(s, x, y, 'precisionAssembly');
-    } else if (tile.kind === 'cmm' && s.research.includes('metrology')) {
-      s.quality = Math.min(100, s.quality + 0.25);
     }
   }
   return powerUsed;
@@ -316,18 +395,33 @@ export function tick(s: GameState, steps = 1): void {
   }
 }
 
-export type FulfillResult = { ok: true } | { ok: false; reason: 'missing' | 'done' | 'stock' | 'quality' | 'expired' | 'locked' };
+export type FulfillResult = { ok: true } | { ok: false; reason: 'missing' | 'done' | 'stock' | 'quality' | 'expired' | 'locked' | 'capability' | 'inspection' };
+export type ContractCheck = { ok: true } | { ok: false; reason: 'stock' | 'quality' | 'capability' | 'inspection' | 'locked' | 'expired' };
+export function meetsContract(s: GameState, contract: Contract): ContractCheck {
+  if (contract.done) return { ok:false, reason:'locked' };
+  if (s.tick >= contract.deadline) return { ok:false, reason:'expired' };
+  if ((contract.requiredResearch && !s.research.includes(contract.requiredResearch)) || (contract.minReputation !== undefined && s.reputation < contract.minReputation)) return { ok:false, reason:'locked' };
+  if ((s.inventory[contract.item] || 0) < contract.qty) return { ok:false, reason:'stock' };
+  const stock = s.stockQuality[contract.item]; const average = stock?.average ?? s.quality;
+  if (average < contract.minGrade) return { ok:false, reason:'quality' };
+  if (contract.minSamples || contract.minCpk) {
+    const c = capability(s, contract.item); if ('insufficientSamples' in c || (contract.minSamples && c.count < contract.minSamples)) return { ok:false, reason:'inspection' };
+    if (contract.minCpk && (c.cpk === null || c.cpk < contract.minCpk)) return { ok:false, reason:'capability' };
+  }
+  return { ok:true };
+}
 
 export function fulfillContract(s: GameState, id: string): FulfillResult {
   const contract = s.contracts.find((candidate) => candidate.id === id);
   if (!contract) return { ok: false, reason: 'missing' };
   if (contract.done) return { ok: false, reason: 'done' };
-  if ((contract.requiredResearch && !s.research.includes(contract.requiredResearch))
-    || (contract.minReputation !== undefined && s.reputation < contract.minReputation)) return { ok: false, reason: 'locked' };
-  if (s.tick >= contract.deadline) return { ok: false, reason: 'expired' };
-  if ((s.inventory[contract.item] || 0) < contract.qty) return { ok: false, reason: 'stock' };
-  if (s.quality < contract.minGrade) return { ok: false, reason: 'quality' };
+  const check = meetsContract(s, contract); if (!check.ok) return { ok: false, reason: check.reason };
+  const stock = s.stockQuality[contract.item];
+  const availableStock = stock || ((s.inventory[contract.item] || 0) > 0 ? { quantity: s.inventory[contract.item], average: s.quality } : undefined);
+  if ((s.inventory[contract.item] || 0) < contract.qty || !availableStock) return { ok: false, reason: 'stock' };
+  if (availableStock.average < contract.minGrade) return { ok: false, reason: 'quality' };
   s.inventory[contract.item] -= contract.qty;
+  if (stock && stock.quantity <= contract.qty) delete s.stockQuality[contract.item]; else if (stock) stock.quantity -= contract.qty;
   s.credits += contract.reward;
   s.reputation += 10;
   contract.done = true;
@@ -335,7 +429,15 @@ export function fulfillContract(s: GameState, id: string): FulfillResult {
 }
 
 export function save(s: GameState): string {
-  return JSON.stringify({ ...s, version: 4 });
+  return JSON.stringify({ ...s, version: 5, schemaVersion: 5 });
+}
+
+export type ServiceResult = { ok: true; cost: number } | { ok: false; reason: 'invalid' | 'already-good' | 'insufficient-credits' };
+export function serviceMachine(s: GameState, x: number, y: number): ServiceResult {
+  const tile = s.grid[y]?.[x]; if (!tile?.kind || ['conveyor','storage','shipping'].includes(tile.kind)) return { ok: false, reason: 'invalid' };
+  if ((tile.condition ?? 100) >= 100) return { ok: false, reason: 'already-good' };
+  const cost = 40; if (s.credits < cost) return { ok: false, reason: 'insufficient-credits' };
+  s.credits -= cost; tile.condition = 100; return { ok: true, cost };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -359,10 +461,12 @@ function mergeContractTemplates(value: unknown): Contract[] {
 }
 
 function migrateLegacy(data: Record<string, unknown>): void {
+  if (data.version === 4) { data.schemaVersion = 5; data.stockQuality = data.stockQuality || {}; data.spc = data.spc || {}; data.stats = data.stats || { attempted: 0, accepted: 0, rejected: 0, scrap: 0 }; if (Array.isArray(data.grid)) for (const row of data.grid) if (Array.isArray(row)) for (const tile of row) if (isRecord(tile) && tile.kind && !['conveyor','storage','shipping'].includes(tile.kind as string) && tile.condition === undefined) { tile.condition = 100; tile.cycle = 0; } data.contracts = mergeContractTemplates(data.contracts); data.version = 5; return; }
   if ((data.version !== 1 && data.version !== 2 && data.version !== 3) || !Array.isArray(data.grid)) return;
   if (data.version === 3 && data.grid.length === GRID_HEIGHT) {
+    data.stockQuality = data.stockQuality || {}; data.spc = data.spc || {}; data.stats = data.stats || { attempted: 0, accepted: 0, rejected: 0, scrap: 0 };
     data.contracts = mergeContractTemplates(data.contracts);
-    data.version = 4;
+    data.version = 5; data.schemaVersion = 5;
     return;
   }
   const oldGrid = data.grid;
@@ -394,7 +498,7 @@ function migrateLegacy(data: Record<string, unknown>): void {
     if (isRecord(tile) && tile.kind === undefined && tile.item === undefined) Object.assign(tile, { item, amount: 999 });
   }
   data.contracts = mergeContractTemplates(data.contracts);
-  data.version = 4;
+  data.version = 5; data.schemaVersion = 5;
 }
 
 function isTile(value: unknown): value is Tile {
@@ -429,8 +533,8 @@ function isInventory(value: unknown): value is Record<string, number> {
   return isRecord(value) && Object.values(value).every(isFiniteNonNegative);
 }
 
-function isGameState(value: unknown): value is GameState & { version: 4 } {
-  if (!isRecord(value) || value.version !== 4) return false;
+function isGameState(value: unknown): value is GameState & { version: 5 } {
+  if (!isRecord(value) || value.version !== 5 || value.schemaVersion !== 5) return false;
   if (!Number.isInteger(value.tick) || (value.tick as number) < 0) return false;
   if (!isFiniteNonNegative(value.credits) || !isFiniteNonNegative(value.power) || !isFiniteNonNegative(value.reputation)) return false;
   if (!isFiniteNonNegative(value.tutorial) || !isFiniteNonNegative(value.quality) || (value.quality as number) > 100) return false;
@@ -438,6 +542,9 @@ function isGameState(value: unknown): value is GameState & { version: 4 } {
   if (!Array.isArray(value.grid) || value.grid.length !== GRID_HEIGHT) return false;
   if (!value.grid.every((row) => Array.isArray(row) && row.length === GRID_WIDTH && row.every(isTile))) return false;
   if (!isInventory(value.inventory)) return false;
+  if (!isRecord(value.stockQuality) || !Object.values(value.stockQuality).every(v => isRecord(v) && isIntegerInRange(v.quantity, 0, Number.MAX_SAFE_INTEGER) && isFiniteNonNegative(v.average) && v.average <= 100)) return false;
+  if (!isRecord(value.spc) || !Object.values(value.spc).every(v => isRecord(v) && isIntegerInRange(v.count, 0, Number.MAX_SAFE_INTEGER) && isFiniteNonNegative(v.mean) && isFiniteNonNegative(v.m2) && isFiniteNonNegative(v.standardDeviation) && (v.cpk === null || isFiniteNonNegative(v.cpk)))) return false;
+  if (!isRecord(value.stats) || !['attempted','accepted','rejected','scrap'].every(k => { const n = (value.stats as Record<string, unknown>)[k]; return Number.isInteger(n) && (n as number) >= 0; }) || (value.stats as any).attempted !== (value.stats as any).accepted + (value.stats as any).rejected || (value.stats as any).scrap !== (value.stats as any).rejected) return false;
   if (!Array.isArray(value.contracts) || !value.contracts.every(isContract)) return false;
   if (typeof value.paused !== 'boolean' || ![1, 2, 3].includes(value.speed as number)) return false;
   if (value.selected !== null && !BUILDING_KINDS.includes(value.selected as BuildingKind)) return false;

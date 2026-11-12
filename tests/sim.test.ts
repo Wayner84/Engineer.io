@@ -148,12 +148,12 @@ describe('Engineer.io simulation', () => {
     expect(migrated.grid[4][5]).toEqual({ rot: 0 });
     expect(migrated.grid[2][6]).toEqual({ kind: 'furnace', rot: 3 });
     expect(migrated.credits).toBe(1080);
-    expect(JSON.parse(save(migrated)).version).toBe(4);
+    expect(JSON.parse(save(migrated)).version).toBe(5);
   });
   it('migrates valid v2 18x12 saves into the enlarged map without overwriting old state', () => {
     const legacy = JSON.parse(save(newGame())); legacy.version = 2; legacy.grid = legacy.grid.slice(0, 12).map((row: unknown[]) => row.slice(0, 18)); legacy.grid[0][0] = { kind: 'furnace', rot: 2 }; legacy.inventory.coal = 37;
     const migrated = load(JSON.stringify(legacy));
-    expect(migrated.grid).toHaveLength(18); expect(migrated.grid[0]).toHaveLength(30); expect(migrated.grid[0][0]).toEqual({ kind: 'furnace', rot: 2 }); expect(migrated.inventory.coal).toBe(37); expect(JSON.parse(save(migrated)).version).toBe(4);
+    expect(migrated.grid).toHaveLength(18); expect(migrated.grid[0]).toHaveLength(30); expect(migrated.grid[0][0]).toMatchObject({ kind: 'furnace', rot: 2 }); expect(migrated.inventory.coal).toBe(37); expect(JSON.parse(save(migrated)).version).toBe(5);
   });
   it('rejects malformed current v3 dimensions', () => { const current = JSON.parse(save(newGame())); current.grid = current.grid.slice(0, 17); expect(() => load(JSON.stringify(current))).toThrow(); });
   it('fails safely for malformed or unsupported saves', () => {
@@ -170,5 +170,32 @@ describe('Engineer.io simulation', () => {
       (x: any) => { x.contracts = [{ id: 4 }]; },
       (x: any) => { x.credits = 'rich'; },
     ]) { const malformed = structuredClone(valid); mutate(malformed); expect(() => load(JSON.stringify(malformed))).toThrow(); }
+  });
+});
+
+describe('shop-floor quality milestone', () => {
+  it('tracks per-item weighted stock quality and rejects low-grade contracts', async () => {
+    const { newGame, fulfillContract } = await import('../src/sim');
+    const s = newGame();
+    expect(s.stockQuality).toBeDefined();
+    s.inventory.steel = 2; s.stockQuality.steel = { quantity: 2, average: 60 };
+    const c = s.contracts[0]; c.qty = 2;
+    expect(fulfillContract(s, c.id)).toEqual({ ok: false, reason: 'quality' });
+  });
+
+  it('initializes condition and service is atomic', async () => {
+    const { newGame, place, serviceMachine } = await import('../src/sim');
+    const s = newGame(); expect(place(s, 0, 0, 'furnace')).toBe(true);
+    expect(s.grid[0][0].condition).toBe(100);
+    s.grid[0][0].condition = 80; s.credits = 0; const before = JSON.stringify(s);
+    expect(serviceMachine(s, 0, 0)).toEqual({ ok: false, reason: 'insufficient-credits' });
+    expect(JSON.stringify(s)).toBe(before);
+  });
+
+  it('migrates v4 saves to v5 quality defaults', async () => {
+    const { newGame, save, load } = await import('../src/sim');
+    const legacy = JSON.parse(save(newGame())); legacy.version = 4;
+    const migrated = load(JSON.stringify(legacy));
+    expect(migrated.schemaVersion).toBe(5); expect(migrated.stats.attempted).toBe(0);
   });
 });
